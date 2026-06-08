@@ -1,0 +1,893 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>HID Logger</title>
+<style>
+:root {
+  --bg: #f0f4f8;
+  --surface: #ffffff;
+  --primary: #1a73e8;
+  --primary-h: #1558b0;
+  --success: #1e8e3e;
+  --danger: #d93025;
+  --warning: #e37400;
+  --text: #202124;
+  --text2: #5f6368;
+  --border: #dadce0;
+  --shadow: rgba(60,64,67,0.15);
+  --r: 8px;
+}
+* { box-sizing: border-box; margin: 0; padding: 0; }
+body {
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Hiragino Sans', sans-serif;
+  background: var(--bg); color: var(--text); min-height: 100vh;
+}
+header {
+  background: var(--surface); border-bottom: 1px solid var(--border);
+  padding: 0 24px; display: flex; align-items: center; gap: 12px; height: 56px;
+  position: sticky; top: 0; z-index: 100; box-shadow: 0 1px 4px var(--shadow);
+}
+header h1 { font-size: 18px; font-weight: 700; flex: 1; }
+.dot { width: 9px; height: 9px; border-radius: 50%; display: inline-block; margin-right: 5px; background: var(--text2); }
+.dot-on { background: var(--success); }
+#status-label { font-size: 13px; color: var(--text2); display: flex; align-items: center; }
+main { max-width: 920px; margin: 28px auto; padding: 0 16px 80px; }
+
+button { cursor: pointer; border: none; border-radius: 6px; padding: 8px 18px; font-size: 14px; font-family: inherit; transition: background .15s, opacity .15s; }
+button:disabled { opacity: 0.5; cursor: default; }
+.btn-primary { background: var(--primary); color: #fff; }
+.btn-primary:not(:disabled):hover { background: var(--primary-h); }
+.btn-secondary { background: var(--border); color: var(--text); }
+.btn-secondary:not(:disabled):hover { background: #c4c7cc; }
+.btn-danger { background: var(--danger); color: #fff; }
+.btn-danger:not(:disabled):hover { background: #b52b20; }
+.btn-success { background: var(--success); color: #fff; }
+.btn-success:not(:disabled):hover { background: #166d31; }
+.btn-sm { padding: 6px 13px; font-size: 13px; }
+
+.tabs { display: flex; gap: 2px; border-bottom: 2px solid var(--border); margin-bottom: 20px; }
+.tab-btn { background: none; border-radius: 6px 6px 0 0; padding: 10px 18px; color: var(--text2); font-size: 14px; font-weight: 500; border: 2px solid transparent; border-bottom: none; margin-bottom: -2px; }
+.tab-btn:hover { color: var(--primary); background: #f0f4ff; }
+.tab-btn.active { color: var(--primary); border-color: var(--border); border-bottom-color: var(--surface); background: var(--surface); }
+.tab-content { display: none; }
+.tab-content.active { display: block; }
+
+.status-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+.status-item { background: var(--bg); border-radius: 6px; padding: 14px; }
+.status-item label { font-size: 11px; text-transform: uppercase; letter-spacing: .6px; color: var(--text2); display: block; margin-bottom: 6px; font-weight: 600; }
+.status-item .val { font-size: 15px; font-weight: 500; display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+
+.table-wrap { overflow: auto; max-height: 460px; border: 1px solid var(--border); border-radius: 6px; margin-top: 10px; }
+table { width: 100%; border-collapse: collapse; font-size: 14px; }
+th { position: sticky; top: 0; background: #f8f9fa; padding: 9px 14px; text-align: left; font-weight: 600; border-bottom: 1px solid var(--border); font-size: 12px; color: var(--text2); text-transform: uppercase; letter-spacing: .4px; }
+td { padding: 8px 14px; border-bottom: 1px solid var(--border); }
+tr:last-child td { border-bottom: none; }
+tr:hover td { background: #f8f9fa; }
+.mono { font-family: 'Cascadia Code', 'Consolas', 'Courier New', monospace; }
+
+.feed { font-family: 'Cascadia Code', 'Consolas', monospace; background: #1e1e2e; color: #cdd6f4; border-radius: 6px; padding: 14px; height: 360px; overflow-y: auto; font-size: 13.5px; }
+.feed-hint { color: #585b70; font-size: 13px; padding: 4px 0; }
+.feed-row { padding: 3px 0; border-bottom: 1px solid #313244; display: flex; gap: 14px; align-items: baseline; }
+.feed-row:last-child { border-bottom: none; }
+.feed-time { color: #a6e3a1; min-width: 70px; flex-shrink: 0; }
+.feed-code { color: #89dceb; word-break: break-all; }
+.feed-new { animation: fadeIn .3s ease; }
+@keyframes fadeIn { from { opacity:0; transform:translateY(-4px); } to { opacity:1; transform:none; } }
+
+.progress-wrap { height: 5px; background: var(--border); border-radius: 3px; overflow: hidden; margin: 8px 0; }
+.progress-fill { height: 100%; background: var(--primary); border-radius: 3px; transition: width .15s; width: 0; }
+
+.clock-row { display: flex; align-items: center; gap: 6px; font-size: 26px; font-weight: 700; margin: 16px 0 24px; }
+.clock-row input { width: 62px; padding: 6px 4px; font-size: 26px; font-weight: 700; text-align: center; border: 2px solid var(--border); border-radius: 6px; font-family: inherit; }
+.clock-row input:focus { outline: none; border-color: var(--primary); }
+.clock-sep { color: var(--text2); }
+
+.toolbar { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; margin-bottom: 10px; }
+.stats { font-size: 13px; color: var(--text2); margin-left: auto; }
+
+.badge { display: inline-block; padding: 2px 9px; border-radius: 12px; font-size: 12px; font-weight: 600; }
+.badge-green { background: #e6f4ea; color: var(--success); }
+.badge-gray { background: #f1f3f4; color: var(--text2); }
+.badge-yellow { background: #fef9e0; color: var(--warning); }
+
+.empty { text-align: center; padding: 40px; color: var(--text2); font-size: 14px; }
+.alert { padding: 10px 14px; border-radius: 6px; font-size: 13.5px; margin-bottom: 10px; }
+.alert-err { background: #fce8e6; color: var(--danger); }
+.alert-ok  { background: #e6f4ea; color: var(--success); }
+.alert-info { background: #e8f0fe; color: var(--primary); }
+
+#connect-screen { text-align: center; padding: 64px 20px; }
+#connect-screen h2 { font-size: 20px; margin-bottom: 10px; }
+#connect-screen p { color: var(--text2); line-height: 1.7; margin-bottom: 24px; font-size: 15px; }
+#no-serial-msg { margin-top: 18px; font-size: 13px; color: var(--danger); }
+
+.filter-input { padding: 6px 10px; border: 1px solid var(--border); border-radius: 6px; font-size: 13px; font-family: inherit; outline: none; width: 180px; }
+.filter-input:focus { border-color: var(--primary); }
+.card { background: var(--surface); border-radius: var(--r); box-shadow: 0 1px 6px var(--shadow); padding: 22px; margin-bottom: 16px; }
+
+.spin { display: inline-block; width: 13px; height: 13px; border: 2px solid rgba(255,255,255,.4); border-top-color: #fff; border-radius: 50%; animation: rotate .6s linear infinite; vertical-align: middle; margin-right: 5px; }
+@keyframes rotate { to { transform: rotate(360deg); } }
+
+/* Debug panel */
+#debug-panel {
+  position: fixed; bottom: 0; left: 0; right: 0; height: 220px;
+  background: #0d1117; color: #8b949e; font-family: 'Cascadia Code', 'Consolas', monospace;
+  font-size: 12px; border-top: 1px solid #30363d; display: none; flex-direction: column; z-index: 200;
+}
+#debug-panel.visible { display: flex; }
+#debug-header {
+  display: flex; align-items: center; gap: 8px; padding: 4px 10px;
+  background: #161b22; border-bottom: 1px solid #30363d; flex-shrink: 0;
+}
+#debug-header span { flex: 1; font-size: 11px; color: #6e7681; font-weight: 600; letter-spacing: .5px; }
+#debug-log { flex: 1; overflow-y: auto; padding: 6px 10px; }
+#debug-log .dl { padding: 1px 0; }
+#debug-log .dl-send  { color: #58a6ff; }
+#debug-log .dl-recv  { color: #3fb950; }
+#debug-log .dl-line  { color: #d2a8ff; }
+#debug-log .dl-bin   { color: #ffa657; }
+#debug-log .dl-err   { color: #f85149; }
+#debug-log .dl-info  { color: #8b949e; }
+#debug-toggle {
+  position: fixed; bottom: 12px; right: 16px; z-index: 201;
+  background: #161b22; color: #8b949e; border: 1px solid #30363d;
+  font-size: 12px; padding: 4px 10px; border-radius: 4px;
+}
+#debug-toggle:hover { color: #cdd9e5; }
+</style>
+</head>
+<body>
+
+<header>
+  <h1>HID Logger</h1>
+  <span id="status-label"><span class="dot" id="dot"></span><span id="status-text">未接続</span></span>
+  <button id="btn-connect" class="btn-primary btn-sm">接続</button>
+</header>
+
+<main>
+  <div id="connect-screen">
+    <h2>デバイスに接続</h2>
+    <p>HID Logger デバイスを USB ポートに接続して、<br>下のボタンを押してください。</p>
+    <button id="btn-connect2" class="btn-primary" style="font-size:15px;padding:11px 32px;">デバイスを選択して接続</button>
+    <div id="no-serial-msg" hidden>
+      このブラウザは Web Serial API に対応していません。<br>
+      Google Chrome または Microsoft Edge をお使いください。
+    </div>
+  </div>
+
+  <div id="app-panel" hidden>
+    <div class="tabs">
+      <button class="tab-btn active" data-tab="status">デバイス情報</button>
+      <button class="tab-btn" data-tab="log">ログ</button>
+      <button class="tab-btn" data-tab="realtime">リアルタイム</button>
+      <button class="tab-btn" data-tab="clock">時計設定</button>
+    </div>
+
+    <!-- Status -->
+    <div id="tab-status" class="tab-content active">
+      <div class="toolbar">
+        <button id="btn-refresh" class="btn-secondary btn-sm">更新</button>
+      </div>
+      <div id="status-alert"></div>
+      <div class="status-grid">
+        <div class="status-item">
+          <label>バーコードリーダー (HID)</label>
+          <div class="val" id="s-hid">—</div>
+        </div>
+        <div class="status-item">
+          <label>USB ストレージ (MSC)</label>
+          <div class="val" id="s-msc">—</div>
+        </div>
+        <div class="status-item">
+          <label>デバイス時刻</label>
+          <div class="val mono" id="s-clock">—</div>
+        </div>
+        <div class="status-item">
+          <label>PC 接続</label>
+          <div class="val" id="s-cdc"><span class="badge badge-green">接続中</span></div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Log -->
+    <div id="tab-log" class="tab-content">
+      <div class="toolbar">
+        <button id="btn-load" class="btn-primary btn-sm">ログ取得</button>
+        <button id="btn-dl" class="btn-secondary btn-sm" disabled>CSV ダウンロード</button>
+        <button id="btn-clear-log" class="btn-danger btn-sm">ログ消去</button>
+        <input id="filter" class="filter-input" placeholder="フィルター..." style="display:none">
+        <span class="stats" id="log-stats"></span>
+      </div>
+      <div class="progress-wrap" id="log-prog-wrap" hidden><div class="progress-fill" id="log-prog"></div></div>
+      <div id="log-alert"></div>
+      <div class="table-wrap">
+        <table>
+          <thead><tr><th style="width:90px">時刻</th><th>バーコード</th></tr></thead>
+          <tbody id="log-body"><tr><td colspan="2"><div class="empty">「ログ取得」を押してログを読み込んでください。</div></td></tr></tbody>
+        </table>
+      </div>
+    </div>
+
+    <!-- Realtime -->
+    <div id="tab-realtime" class="tab-content">
+      <div class="toolbar">
+        <button id="btn-pt" class="btn-primary btn-sm">リアルタイム受信 開始</button>
+        <button id="btn-clear-feed" class="btn-secondary btn-sm">クリア</button>
+        <span class="stats" id="feed-count">0 件</span>
+      </div>
+      <div class="feed" id="feed">
+        <div class="feed-hint" id="feed-hint">「リアルタイム受信 開始」を押すと、スキャン結果がここに表示されます。</div>
+      </div>
+    </div>
+
+    <!-- Clock -->
+    <div id="tab-clock" class="tab-content">
+      <div class="card" style="max-width:400px">
+        <h3 style="font-size:15px;margin-bottom:14px">デバイス時刻を設定</h3>
+        <div class="toolbar" style="margin-bottom:16px">
+          <button id="btn-sync" class="btn-secondary btn-sm">PC の現在時刻を取得</button>
+        </div>
+        <div class="clock-row">
+          <input type="number" id="c-h" min="0" max="23" value="0">
+          <span class="clock-sep">:</span>
+          <input type="number" id="c-m" min="0" max="59" value="0">
+          <span class="clock-sep">:</span>
+          <input type="number" id="c-s" min="0" max="59" value="0">
+        </div>
+        <button id="btn-setclock" class="btn-primary">時刻を設定</button>
+        <div id="clock-result" style="margin-top:12px;font-size:13.5px"></div>
+      </div>
+    </div>
+  </div>
+</main>
+
+<!-- Debug panel -->
+<div id="debug-panel">
+  <div id="debug-header">
+    <span>SERIAL DEBUG LOG</span>
+    <button class="btn-sm" id="btn-debug-clear" style="padding:2px 8px;font-size:11px;background:#21262d;color:#8b949e;border:1px solid #30363d">Clear</button>
+    <button class="btn-sm" id="btn-debug-close" style="padding:2px 8px;font-size:11px;background:#21262d;color:#8b949e;border:1px solid #30363d">×</button>
+  </div>
+  <div id="debug-log"></div>
+</div>
+<button id="debug-toggle">Debug</button>
+
+<script type="module">
+
+// ── Debug Logger ─────────────────────────────────────────────────
+
+const debugEl  = document.getElementById('debug-log');
+const debugPanel = document.getElementById('debug-panel');
+let debugVisible = false;
+
+function dbg(cls, ...parts) {
+  const ts = new Date().toISOString().slice(11, 23);
+  const msg = parts.join(' ');
+  console.log(`[HIDLogger ${ts}] ${msg}`);
+  const div = document.createElement('div');
+  div.className = `dl dl-${cls}`;
+  div.textContent = `${ts} ${msg}`;
+  debugEl.appendChild(div);
+  // keep at most 300 entries
+  while (debugEl.childElementCount > 300) debugEl.firstChild.remove();
+  if (debugVisible) debugEl.scrollTop = debugEl.scrollHeight;
+}
+
+document.getElementById('debug-toggle').addEventListener('click', () => {
+  debugVisible = !debugVisible;
+  debugPanel.classList.toggle('visible', debugVisible);
+  if (debugVisible) debugEl.scrollTop = debugEl.scrollHeight;
+});
+document.getElementById('btn-debug-close').addEventListener('click', () => {
+  debugVisible = false; debugPanel.classList.remove('visible');
+});
+document.getElementById('btn-debug-clear').addEventListener('click', () => {
+  debugEl.innerHTML = '';
+});
+
+// ── Serial API ────────────────────────────────────────────────────
+
+let serial = null;
+
+async function initSerial() {
+  if ('serial' in navigator) {
+    serial = navigator.serial;
+    dbg('info', 'Native Web Serial API available');
+    return true;
+  }
+  try {
+    const mod = await import('https://esm.sh/@google/web-serial-polyfill@1.0.15');
+    serial = new mod.SerialPolyfill();
+    dbg('info', 'Using web-serial-polyfill');
+    return true;
+  } catch(e) {
+    dbg('err', 'Serial init failed:', e.message);
+    return false;
+  }
+}
+
+// ── Device Protocol ───────────────────────────────────────────────
+//
+// BUG FIX: Previous version used _lineQ (waiters only). When multiple lines
+// arrived in one USB packet, only the first was delivered to the waiting
+// resolver; the rest had no resolver yet and were silently discarded.
+//
+// Fix: _lineBuf buffers parsed lines. _readLine() checks the buffer first,
+// so lines that arrived before a resolver was registered are not lost.
+//
+// Also fixed: passthrough lines (HH:MM:SS\t...) are routed directly to the
+// passthrough callback even during commands, preventing interleaving.
+
+class Device {
+  constructor() {
+    this.port        = null;
+    this._writer     = null;
+    this._reader     = null;
+    this._decoder    = new TextDecoder('utf-8');
+    this._encoder    = new TextEncoder();
+    this._rawBuf     = new Uint8Array(0);
+    this._lineBuf    = [];   // parsed lines buffered for next _readLine()
+    this._lineWait   = [];   // { resolve, timer } waiting for next line
+    this._binResolve = null;
+    this._binNeed    = 0;
+    this._ptOn       = false;
+    this.onPassthrough = null;
+    this.onDisconnect  = null;
+    this._mutex      = Promise.resolve();
+  }
+
+  async connect(port) {
+    this.port = port;
+    await this.port.open({ baudRate: 115200 });
+    this._writer = this.port.writable.getWriter();
+    dbg('info', 'Port opened (115200 baud)');
+    this._startLoop();
+  }
+
+  async disconnect() {
+    try { if (this._reader) await this._reader.cancel(); } catch {}
+    try { if (this._writer) await this._writer.close(); } catch {}
+    try { await this.port.close(); } catch {}
+    this.port = null; this._writer = null; this._reader = null;
+    dbg('info', 'Port closed');
+  }
+
+  _startLoop() {
+    (async () => {
+      this._reader = this.port.readable.getReader();
+      dbg('info', 'Read loop started');
+      try {
+        while (true) {
+          const { value, done } = await this._reader.read();
+          if (done) break;
+          dbg('recv', `${value.length}B: ${this._decoder.decode(value).replace(/\r/g,'\\r').replace(/\n/g,'\\n')}`);
+          const merged = new Uint8Array(this._rawBuf.length + value.length);
+          merged.set(this._rawBuf); merged.set(value, this._rawBuf.length);
+          this._rawBuf = merged;
+          this._process();
+        }
+      } catch(e) {
+        dbg('err', 'Read loop error:', e.message);
+      } finally {
+        try { this._reader.releaseLock(); } catch {}
+        this._reader = null;
+        dbg('info', 'Read loop ended');
+        if (this.onDisconnect) this.onDisconnect();
+      }
+    })();
+  }
+
+  _process() {
+    while (true) {
+      // ── Binary wait takes absolute priority ──
+      if (this._binResolve !== null) {
+        if (this._rawBuf.length < this._binNeed) break;
+        const data = this._rawBuf.slice(0, this._binNeed);
+        this._rawBuf = this._rawBuf.slice(this._binNeed);
+        dbg('bin', `resolved ${data.length}B, rawBuf remaining: ${this._rawBuf.length}B`);
+        const r = this._binResolve;
+        this._binResolve = null; this._binNeed = 0;
+        r(data);
+        continue; // re-check: more data may be in rawBuf
+      }
+
+      // ── Find newline ──
+      let nl = -1;
+      for (let i = 0; i < this._rawBuf.length; i++) {
+        if (this._rawBuf[i] === 0x0a) { nl = i; break; }
+      }
+      if (nl === -1) break;
+
+      let lb = this._rawBuf.slice(0, nl);
+      this._rawBuf = this._rawBuf.slice(nl + 1);
+      if (lb.length > 0 && lb[lb.length - 1] === 0x0d) lb = lb.slice(0, -1);
+      const line = this._decoder.decode(lb);
+
+      // ── Route passthrough lines directly (bypass command waiters) ──
+      // Passthrough format: "HH:MM:SS\t<data>"
+      if (this._ptOn && this.onPassthrough && /^\d{2}:\d{2}:\d{2}\t/.test(line)) {
+        dbg('line', `passthrough: "${line}"`);
+        this.onPassthrough(line);
+        continue;
+      }
+
+      // ── Deliver to waiter OR buffer for future _readLine() ──
+      if (this._lineWait.length > 0) {
+        const w = this._lineWait.shift();
+        clearTimeout(w.timer);
+        dbg('line', `→waiter: "${line}" (${this._lineWait.length} waiters remaining)`);
+        w.resolve(line);
+      } else {
+        // KEY FIX: buffer instead of discarding
+        dbg('line', `→buf[${this._lineBuf.length}]: "${line}"`);
+        this._lineBuf.push(line);
+      }
+    }
+  }
+
+  _readLine(ms = 6000) {
+    // KEY FIX: check buffer first — lines that arrived before this call was
+    // made (e.g. all 4 status lines in one USB packet) are not lost.
+    if (this._lineBuf.length > 0) {
+      const line = this._lineBuf.shift();
+      dbg('line', `_readLine ←buf: "${line}" (${this._lineBuf.length} left)`);
+      return Promise.resolve(line);
+    }
+    return new Promise((resolve, reject) => {
+      const w = { resolve: null, timer: null };
+      w.resolve = (l) => {
+        dbg('line', `_readLine ←recv: "${l}"`);
+        resolve(l);
+      };
+      if (ms > 0) {
+        w.timer = setTimeout(() => {
+          const i = this._lineWait.indexOf(w);
+          if (i !== -1) this._lineWait.splice(i, 1);
+          const msg = `タイムアウト (${ms}ms) waiters:${this._lineWait.length} lineBuf:${this._lineBuf.length} rawBuf:${this._rawBuf.length}B`;
+          dbg('err', `_readLine timeout — ${msg}`);
+          reject(new Error(msg));
+        }, ms);
+      }
+      this._lineWait.push(w);
+      dbg('line', `_readLine waiting (waiters: ${this._lineWait.length}, lineBuf: ${this._lineBuf.length})`);
+    });
+  }
+
+  _readBinary(n, ms = 20000) {
+    dbg('bin', `_readBinary(${n}), rawBuf: ${this._rawBuf.length}B`);
+    if (n === 0) return Promise.resolve(new Uint8Array(0));
+    return new Promise((resolve, reject) => {
+      const timer = ms > 0 ? setTimeout(() => {
+        this._binResolve = null;
+        const msg = `バイナリタイムアウト (need ${n}B, have ${this._rawBuf.length}B)`;
+        dbg('err', msg);
+        reject(new Error(msg));
+      }, ms) : null;
+      const r = (d) => { clearTimeout(timer); resolve(d); };
+      if (this._rawBuf.length >= n) {
+        const data = this._rawBuf.slice(0, n);
+        this._rawBuf = this._rawBuf.slice(n);
+        dbg('bin', `_readBinary resolved immediately: ${data.length}B`);
+        r(data);
+      } else {
+        this._binResolve = r; this._binNeed = n;
+        dbg('bin', `_readBinary waiting for ${n}B (have ${this._rawBuf.length}B)`);
+      }
+    });
+  }
+
+  async _send(cmd) {
+    dbg('send', `"${cmd}"`);
+    await this._writer.write(this._encoder.encode(cmd + '\n'));
+  }
+
+  _cmd(fn) {
+    const p = this._mutex.then(() => fn());
+    this._mutex = p.catch(() => {});
+    return p;
+  }
+
+  // ── Commands ──────────────────────────────────────────────────
+
+  async getStatus() {
+    return this._cmd(async () => {
+      await this._send('status');
+      const first = await this._readLine();
+      if (!first.startsWith('+OK')) throw new Error(first);
+      const r = {};
+      for (let i = 0; i < 3; i++) {
+        const l = await this._readLine();
+        const c = l.indexOf(': ');
+        if (c !== -1) r[l.slice(0, c).toLowerCase()] = l.slice(c + 2);
+        else dbg('err', `getStatus: unexpected line[${i}]: "${l}"`);
+      }
+      dbg('info', 'getStatus result:', JSON.stringify(r));
+      return r;
+    });
+  }
+
+  async getLogSize() {
+    return this._cmd(async () => {
+      await this._send('log get size');
+      const l = await this._readLine();
+      if (!l.startsWith('+OK')) throw new Error(l);
+      const m = l.match(/filesize=(\d+)/);
+      if (!m) throw new Error('filesize parse error: ' + l);
+      const size = parseInt(m[1]);
+      dbg('info', `log size: ${size} bytes`);
+      return size;
+    });
+  }
+
+  async readLogChunk(offset, length) {
+    return this._cmd(async () => {
+      await this._send(`log read ${offset},${length}`);
+      const first = await this._readLine(10000);
+      if (!first.startsWith('+OK')) throw new Error(first);
+      const m = first.match(/length=(\d+)/);
+      const len = m ? parseInt(m[1]) : length;
+      dbg('bin', `readLogChunk(text): offset=${offset} length=${len}`);
+      const chunks = [];
+      let total = 0;
+      while (total < len) {
+        const line = await this._readLine(10000);
+        const bytes = this._encoder.encode(line + '\r\n');
+        if (total + bytes.length > len) {
+          throw new Error(`ログチャンク長が不正です (need ${len}B, got ${total + bytes.length}B)`);
+        }
+        chunks.push(bytes);
+        total += bytes.length;
+      }
+      const data = new Uint8Array(len);
+      let pos = 0;
+      for (const chunk of chunks) {
+        data.set(chunk, pos);
+        pos += chunk.length;
+      }
+      // Consume the trailing \r\n that Serial.println() appends after the log data.
+      const trail = await this._readLine(4000);
+      dbg('bin', `readLogChunk(text): trailing line = "${trail}" (expected empty)`);
+      return this._decoder.decode(data);
+    });
+  }
+
+  async readFullLog(onProgress) {
+    const size = await this.getLogSize();
+    if (size === 0) { dbg('info', 'log is empty'); return ''; }
+    dbg('info', `reading chunk offset=0 len=${size}`);
+    const text = await this.readLogChunk(0, size);
+    if (onProgress) onProgress(1);
+    dbg('info', `readFullLog done: ${this._encoder.encode(text).length} bytes total`);
+    return text;
+  }
+
+  async clearLog() {
+    return this._cmd(async () => {
+      await this._send('log clear');
+      const l = await this._readLine();
+      if (!l.startsWith('+OK')) throw new Error(l);
+      dbg('info', 'log cleared');
+    });
+  }
+
+  async setClock(h, m, s) {
+    return this._cmd(async () => {
+      const p = n => String(n).padStart(2, '0');
+      await this._send(`clock set ${p(h)}:${p(m)}:${p(s)}`);
+      const l = await this._readLine();
+      if (!l.startsWith('+OK')) throw new Error(l);
+      dbg('info', 'clock set:', l);
+      return l;
+    });
+  }
+
+  async setPassthrough(on) {
+    return this._cmd(async () => {
+      await this._send(`dump set ${on ? 'on' : 'off'}`);
+      const l = await this._readLine();
+      if (!l.startsWith('+OK')) throw new Error(l);
+      this._ptOn = on;
+      dbg('info', `passthrough ${on ? 'enabled' : 'disabled'}`);
+    });
+  }
+}
+
+// ── UI ────────────────────────────────────────────────────────────
+
+const device   = new Device();
+let connected  = false;
+let ptActive   = false;
+let feedCount  = 0;
+let logEntries = [];
+
+const $ = id => document.getElementById(id);
+const esc = s => String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+
+document.querySelectorAll('.tab-btn').forEach(b => {
+  b.addEventListener('click', () => {
+    document.querySelectorAll('.tab-btn').forEach(x => x.classList.remove('active'));
+    document.querySelectorAll('.tab-content').forEach(x => x.classList.remove('active'));
+    b.classList.add('active');
+    $('tab-' + b.dataset.tab).classList.add('active');
+  });
+});
+
+function setConnected(on) {
+  connected = on;
+  $('dot').className = 'dot' + (on ? ' dot-on' : '');
+  $('status-text').textContent = on ? '接続済み' : '未接続';
+  $('btn-connect').textContent = on ? '切断' : '接続';
+  $('btn-connect').className = on ? 'btn-secondary btn-sm' : 'btn-primary btn-sm';
+  $('connect-screen').hidden = on;
+  $('app-panel').hidden = !on;
+}
+
+function fmtDevice(v) {
+  if (!v) return '—';
+  if (v.startsWith('unmounted')) return '<span class="badge badge-gray">未接続</span>';
+  const m = v.match(/mounted\(0x([0-9a-f]+),0x([0-9a-f]+)\)/i);
+  if (m) return `<span class="badge badge-green">接続中</span> <span style="font-size:12px;color:var(--text2);font-family:monospace">VID:${m[1].toUpperCase()} PID:${m[2].toUpperCase()}</span>`;
+  return esc(v);
+}
+
+function showAlert(elId, cls, msg, autoHideMs = 0) {
+  const el = $(elId);
+  if (!el) return;
+  el.innerHTML = `<div class="alert alert-${cls}">${esc(msg)}</div>`;
+  if (autoHideMs > 0) setTimeout(() => { if (el) el.innerHTML = ''; }, autoHideMs);
+}
+
+// ── Connect ──
+
+async function doConnect() {
+  if (!serial) return;
+  try {
+    dbg('info', 'requestPort...');
+    const port = await serial.requestPort();
+    dbg('info', 'port selected, connecting...');
+    await device.connect(port);
+    device.onDisconnect = () => {
+      dbg('info', 'device disconnected');
+      setConnected(false);
+      if (ptActive) { ptActive = false; updatePtBtn(); }
+    };
+    device.onPassthrough = onPassthrough;
+    setConnected(true);
+    await refreshStatus();
+  } catch(e) {
+    if (e.name !== 'NotFoundError') {
+      dbg('err', 'connect failed:', e.message);
+      alert('接続に失敗しました: ' + e.message);
+    }
+  }
+}
+
+async function doDisconnect() {
+  if (ptActive) {
+    try { await device.setPassthrough(false); } catch {}
+    ptActive = false; updatePtBtn();
+  }
+  await device.disconnect();
+  setConnected(false);
+}
+
+$('btn-connect').addEventListener('click', () => connected ? doDisconnect() : doConnect());
+$('btn-connect2').addEventListener('click', doConnect);
+
+// ── Status tab ──
+
+async function refreshStatus() {
+  const btn = $('btn-refresh');
+  btn.disabled = true;
+  $('status-alert').innerHTML = '';
+  try {
+    const s = await device.getStatus();
+    $('s-hid').innerHTML   = fmtDevice(s['hid']   || '');
+    $('s-msc').innerHTML   = fmtDevice(s['msc']   || '');
+    $('s-clock').textContent = s['clock'] || '—';
+  } catch(e) {
+    dbg('err', 'refreshStatus failed:', e.message);
+    showAlert('status-alert', 'err', 'ステータス取得エラー: ' + e.message);
+  } finally {
+    btn.disabled = false;
+  }
+}
+
+$('btn-refresh').addEventListener('click', refreshStatus);
+
+// ── Log tab ──
+
+function parseLog(text) {
+  return text
+    .split('\n')
+    .map(l => l.replace(/\r$/, ''))
+    .filter(l => l.trim())
+    .map(l => {
+      const t = l.indexOf('\t');
+      return t === -1 ? { time: '', code: l } : { time: l.slice(0, t), code: l.slice(t + 1) };
+    })
+    .filter(e => e.code);
+}
+
+function renderLog(entries) {
+  const tbody = $('log-body');
+  if (!entries.length) {
+    tbody.innerHTML = '<tr><td colspan="2"><div class="empty">ログエントリがありません。</div></td></tr>';
+    return;
+  }
+  tbody.innerHTML = entries.map(e =>
+    `<tr><td class="mono" style="white-space:nowrap;color:var(--text2)">${esc(e.time)}</td><td><strong>${esc(e.code)}</strong></td></tr>`
+  ).join('');
+}
+
+$('btn-load').addEventListener('click', async () => {
+  const btn = $('btn-load');
+  $('log-alert').innerHTML = '';
+
+  // Pause passthrough to prevent stream corruption during log read
+  const wasActive = ptActive;
+  if (ptActive) {
+    dbg('info', 'pausing passthrough for log read');
+    try { await device.setPassthrough(false); } catch(e) { dbg('err', 'pause pt failed:', e.message); }
+    ptActive = false; updatePtBtn();
+  }
+
+  btn.disabled = true;
+  btn.innerHTML = '<span class="spin"></span>読込中...';
+  $('log-prog-wrap').hidden = false;
+  const fill = $('log-prog'); fill.style.width = '0%';
+
+  try {
+    const text = await device.readFullLog(p => { fill.style.width = (p * 100 | 0) + '%'; });
+    logEntries = parseLog(text);
+    renderLog(logEntries);
+    $('log-stats').textContent = `${logEntries.length} 件 / ${new TextEncoder().encode(text).length.toLocaleString()} bytes`;
+    $('btn-dl').disabled = false;
+    $('filter').style.display = logEntries.length > 5 ? '' : 'none';
+  } catch(e) {
+    dbg('err', 'readFullLog failed:', e.message);
+    showAlert('log-alert', 'err', 'ログ読込エラー: ' + e.message);
+  } finally {
+    btn.disabled = false;
+    btn.textContent = 'ログ取得';
+    $('log-prog-wrap').hidden = true;
+    fill.style.width = '0%';
+    if (wasActive) {
+      dbg('info', 'resuming passthrough');
+      try { await device.setPassthrough(true); ptActive = true; updatePtBtn(); } catch {}
+    }
+  }
+});
+
+$('filter').addEventListener('input', function() {
+  const q = this.value.trim().toLowerCase();
+  const filtered = q ? logEntries.filter(e => e.code.toLowerCase().includes(q) || e.time.includes(q)) : logEntries;
+  renderLog(filtered);
+  $('log-stats').textContent = q ? `${filtered.length} / ${logEntries.length} 件` : `${logEntries.length} 件`;
+});
+
+$('btn-dl').addEventListener('click', () => {
+  if (!logEntries.length) return;
+  const csv = '時刻,バーコード\r\n' +
+    logEntries.map(e => `"${e.time}","${e.code.replace(/"/g,'""')}"`).join('\r\n');
+  const blob = new Blob(['﻿' + csv], { type: 'text/csv;charset=utf-8' });
+  const a = Object.assign(document.createElement('a'), {
+    href: URL.createObjectURL(blob),
+    download: `hidlog_${new Date().toISOString().slice(0,10)}.csv`
+  });
+  a.click(); URL.revokeObjectURL(a.href);
+});
+
+$('btn-clear-log').addEventListener('click', async () => {
+  if (!confirm('ログファイルを消去しますか？この操作は元に戻せません。')) return;
+  const btn = $('btn-clear-log');
+  btn.disabled = true;
+  try {
+    await device.clearLog();
+    logEntries = []; renderLog([]);
+    $('log-stats').textContent = '0 件';
+    $('btn-dl').disabled = true;
+    $('filter').style.display = 'none';
+    showAlert('log-alert', 'ok', 'ログを消去しました。', 3000);
+  } catch(e) {
+    dbg('err', 'clearLog failed:', e.message);
+    showAlert('log-alert', 'err', '消去エラー: ' + e.message);
+  } finally {
+    btn.disabled = false;
+  }
+});
+
+// ── Realtime tab ──
+
+function onPassthrough(line) {
+  const hint = $('feed-hint');
+  if (hint) hint.remove();
+  const t = line.indexOf('\t');
+  const time = t !== -1 ? line.slice(0, t) : '';
+  const code = t !== -1 ? line.slice(t + 1) : line;
+  feedCount++;
+  $('feed-count').textContent = `${feedCount} 件`;
+  const row = document.createElement('div');
+  row.className = 'feed-row feed-new';
+  row.innerHTML = `<span class="feed-time">${esc(time)}</span><span class="feed-code">${esc(code)}</span>`;
+  const feed = $('feed');
+  feed.appendChild(row);
+  feed.scrollTop = feed.scrollHeight;
+}
+
+function updatePtBtn() {
+  const btn = $('btn-pt');
+  btn.textContent = ptActive ? 'リアルタイム受信 停止' : 'リアルタイム受信 開始';
+  btn.className   = ptActive ? 'btn-danger btn-sm' : 'btn-primary btn-sm';
+}
+
+$('btn-pt').addEventListener('click', async () => {
+  const btn = $('btn-pt');
+  btn.disabled = true;
+  try {
+    await device.setPassthrough(!ptActive);
+    ptActive = !ptActive;
+    updatePtBtn();
+  } catch(e) {
+    dbg('err', 'setPassthrough failed:', e.message);
+    alert('エラー: ' + e.message);
+  } finally {
+    btn.disabled = false;
+  }
+});
+
+$('btn-clear-feed').addEventListener('click', () => {
+  $('feed').innerHTML = ptActive
+    ? ''
+    : '<div class="feed-hint" id="feed-hint">「リアルタイム受信 開始」を押すと、スキャン結果がここに表示されます。</div>';
+  feedCount = 0; $('feed-count').textContent = '0 件';
+});
+
+// ── Clock tab ──
+
+$('btn-sync').addEventListener('click', () => {
+  const n = new Date();
+  $('c-h').value = n.getHours();
+  $('c-m').value = n.getMinutes();
+  $('c-s').value = n.getSeconds();
+});
+
+$('btn-setclock').addEventListener('click', async () => {
+  const h = Math.min(23, Math.max(0, parseInt($('c-h').value) || 0));
+  const m = Math.min(59, Math.max(0, parseInt($('c-m').value) || 0));
+  const s = Math.min(59, Math.max(0, parseInt($('c-s').value) || 0));
+  const res = $('clock-result');
+  const btn = $('btn-setclock');
+  btn.disabled = true;
+  try {
+    await device.setClock(h, m, s);
+    const p = n => String(n).padStart(2, '0');
+    res.innerHTML = `<span style="color:var(--success)">✓ ${p(h)}:${p(m)}:${p(s)} に設定しました。</span>`;
+    await refreshStatus();
+  } catch(e) {
+    dbg('err', 'setClock failed:', e.message);
+    res.innerHTML = `<span style="color:var(--danger)">✗ エラー: ${esc(e.message)}</span>`;
+  } finally {
+    btn.disabled = false;
+    setTimeout(() => { res.textContent = ''; }, 5000);
+  }
+});
+
+// ── Init ──────────────────────────────────────────────────────────
+
+(async () => {
+  dbg('info', 'Initializing...');
+  const ok = await initSerial();
+  if (!ok) {
+    $('no-serial-msg').hidden = false;
+    $('btn-connect').disabled = true;
+    $('btn-connect2').disabled = true;
+  }
+  setConnected(false);
+  dbg('info', 'Ready.');
+})();
+</script>
+</body>
+</html>
