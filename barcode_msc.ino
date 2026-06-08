@@ -294,7 +294,7 @@ void loop() {
   }
 
   unsigned long now = millis();
-  if (!app_status.redraw_status_completed && (app_status.redraw_status) || ((long)(now - app_status.status_clear_timer) > 0)) {
+  if (!app_status.redraw_status_completed && (app_status.redraw_status || ((long)(now - app_status.status_clear_timer) > 0))) {
     display.fillRect(0, 24, 128, 8, SSD1306_BLACK);
     display.setTextSize(1);
     display.setCursor(0, 24);
@@ -345,6 +345,7 @@ void loop() {
         display.fillRect(0, 24, 128, 8, SSD1306_BLACK);
         display.print("MSC Error");
         display.display();
+        request_clear_after_millis(3000);
       }
 
       if (app_status.is_passthrough_enabled) {
