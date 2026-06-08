@@ -292,7 +292,8 @@ document.getElementById('btn-debug-clear').addEventListener('click', () => {
 let serial = null;
 
 async function initSerial() {
-  if ('serial' in navigator) {
+  const isAndroid = /Android/i.test(navigator.userAgent);
+  if (!isAndroid && 'serial' in navigator) {
     serial = navigator.serial;
     dbg('info', 'Native Web Serial API available');
     return true;
@@ -300,7 +301,7 @@ async function initSerial() {
   try {
     const mod = await import('https://esm.sh/@google/web-serial-polyfill@1.0.15');
     serial = new mod.SerialPolyfill();
-    dbg('info', 'Using web-serial-polyfill');
+    dbg('info', isAndroid ? 'Android detected: using web-serial-polyfill' : 'Using web-serial-polyfill');
     return true;
   } catch(e) {
     dbg('err', 'Serial init failed:', e.message);
