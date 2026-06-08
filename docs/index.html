@@ -153,7 +153,9 @@ tr:hover td { background: #f8f9fa; }
     <button id="btn-connect2" class="btn-primary" style="font-size:15px;padding:11px 32px;">デバイスを選択して接続</button>
     <div id="no-serial-msg" hidden>
       このブラウザは Web Serial API に対応していません。<br>
-      Google Chrome または Microsoft Edge をお使いください。
+      PC では Google Chrome または Microsoft Edge をお使いください。<br>
+      Android では Chrome が必要です（HTTPS 接続必須・WebUSB が有効な環境）。<br>
+      詳細はデバッグパネルをご確認ください。
     </div>
   </div>
 
@@ -298,10 +300,14 @@ async function initSerial() {
     dbg('info', 'Native Web Serial API available');
     return true;
   }
+  if (!('usb' in navigator)) {
+    dbg('err', 'WebUSB (navigator.usb) not available — polyfill requires WebUSB');
+    return false;
+  }
   try {
-    const mod = await import('https://esm.sh/@google/web-serial-polyfill@1.0.15');
-    serial = new mod.SerialPolyfill();
-    dbg('info', isAndroid ? 'Android detected: using web-serial-polyfill' : 'Using web-serial-polyfill');
+    const mod = await import('./serial-polyfill.js');
+    serial = mod.serial;
+    dbg('info', isAndroid ? 'Android detected: using web-serial-polyfill (WebUSB)' : 'Using web-serial-polyfill');
     return true;
   } catch(e) {
     dbg('err', 'Serial init failed:', e.message);
