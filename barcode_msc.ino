@@ -38,58 +38,84 @@ typedef struct {
     bool is_passthrough_enabled;
 
     bool redraw_status;
+    bool redraw_status_completed;
+    unsigned long status_clear_timer;
 
     // This device is mounted as CDC device from PC.
     bool is_cdc_device_mounted;
 } app_status_t;
 static app_status_t app_status;
 
-
-template<typename T, size_t BUFLEN>
-class RingBuffer {
+template<size_t BUFLEN>
+class TextBuffer {
 public:
-  size_t next_write_idx = 0;
-  size_t next_read_idx = 0;
-  T buffer[BUFLEN];
+    char buffer[BUFLEN];
+    size_t end = 0;
 
-  void begin() {
-    next_write_idx = 0;
-    next_read_idx = 0;
-  }
-
-  bool is_empty() {
-    return next_write_idx == next_read_idx;
-  }
-
-  bool is_full() {
-    return (next_write_idx + 1) % BUFLEN == next_read_idx;
-  }
-
-  bool push(T val) {
-    if (is_full()) { return false; }
-    buffer[next_write_idx] = val;
-    next_write_idx = (next_write_idx + 1) % BUFLEN;
-    return true;
-  }
-
-  bool pop(T* val) {
-    if (is_empty()) {
-      return false;
+    void begin() {
+        clear();
     }
-    if (val != nullptr) {
-      *val = buffer[next_read_idx];
+
+    size_t length() {
+        return end;
     }
-    next_read_idx = (next_read_idx + 1) % BUFLEN;
-    return true;
-  }
+
+    bool is_full() {
+        return length() == capacity();
+    }
+
+    bool is_empty() {
+        return end == 0;
+    }
+
+    bool append_char(char ch) {
+        if (length() + 1 > capacity()) {
+            return false;
+        } else {
+            buffer[end] = ch;
+            end += 1;
+            buffer[end] = '\0';
+            return true;
+        }
+    }
+
+    bool append_str(const char* s) {
+        size_t slen = strlen(s);
+        if (length() + slen > capacity()) {
+            return false;
+        } else {
+            memcpy(&buffer[end], s, slen);
+            end += slen;
+            buffer[end] = '\0';
+            return true;
+        }
+    }
+
+    bool truncate(size_t newsize) {
+        if (newsize >= length()) {
+            return false;
+        } else {
+            end = newsize;
+            buffer[end] = '\0';
+            return true;
+        }
+    }
+
+    const char* get_str() {
+        return buffer;
+    }
+
+    void clear() {
+        end = 0;
+        buffer[0] = '\0';
+    }
+
+    size_t capacity() const {
+        return BUFLEN - 1;
+    }
 };
 
-static RingBuffer<char, 128> input_buffer;
-
-constexpr size_t buflen = 128;
-static uint8_t buf[128];
-
-unsigned long status_clear_timer = 0;
+static TextBuffer<256> textBuffer;
 
 
 class ClockManager {
@@ -181,14 +207,14 @@ void setup() {
           app_status.hid_vid = vid;
           app_status.hid_pid = pid;
           app_status.is_hid_mounted = true;
-          app_status.redraw_status = true;
+          request_redraw_status();
       }
   });
 
   KeyboardHost.onUmount([](uint8_t dev_addr, uint8_t instance) {
       if (app_status.is_hid_mounted && app_status.hid_addr == dev_addr && app_status.hid_instance == instance) {
           app_status.is_hid_mounted = false;
-          app_status.redraw_status = true;
+          request_redraw_status();
       }
   });
   KeyboardHost.setLayout(KeyboardLayout::JP_JIS); // or KeyboardLayout::US_ASCII
@@ -206,13 +232,13 @@ void setup() {
         app_status.msc_vid = vid;
         app_status.msc_pid = pid;
         app_status.is_msc_mounted = true;
-        app_status.redraw_status = true;
+        request_redraw_status();
     }
   });
   MassStorageHost.onVolumeUmount([](uint8_t dev_addr, uint8_t lun) {
     if (app_status.is_msc_mounted && app_status.msc_addr == dev_addr && app_status.msc_lun == lun) {
         app_status.is_msc_mounted = false;
-        app_status.redraw_status = true;
+        request_redraw_status();
     }
   });
 
@@ -234,35 +260,47 @@ void setup() {
   display.setCursor(0, 24);
   display.print("Ready.");
   display.display();
-  status_clear_timer = millis() + 3000;
+  request_clear_after_millis(3000);
 }
 
 void loop() {
   USBHost.task();
 
-  if ((!app_status.is_cdc_device_mounted && Serial) || (app_status.is_cdc_device_mounted && !Serial)) {
-    app_status.is_cdc_device_mounted = true;
+  if (!app_status.is_cdc_device_mounted && Serial) {
+      app_status.is_cdc_device_mounted = true;
+      request_redraw_status();
+  } else if (app_status.is_cdc_device_mounted && !Serial) {
+      app_status.is_cdc_device_mounted = false;
+      request_redraw_status();
   }
 
   unsigned long now = millis();
-  if (app_status.redraw_status || ((long)(now - status_clear_timer) > 0)) {
+  if (!app_status.redraw_status_completed && (app_status.redraw_status) || ((long)(now - app_status.status_clear_timer) > 0)) {
     display.fillRect(0, 24, 128, 8, SSD1306_BLACK);
     display.setTextSize(1);
+    display.setCursor(0, 24);
+    if (app_status.is_hid_mounted || app_status.is_msc_mounted || Serial) {
+        display.print("Conn: ");
+    }
     if (app_status.is_hid_mounted) {
-        display.setCursor(0, 24);
-        display.print("[HID]");
+        display.print("HID");
     }
     if (app_status.is_msc_mounted) {
-        display.setCursor(5 * 7, 24);
-        display.print("[MSC]");
+        if (app_status.is_hid_mounted) {
+            display.print("/");
+        }
+        display.print("MSC");
     }
     if (Serial) {
-        display.setCursor(5 * 7 + 5 * 7, 24);
-        display.print("[cdc]");
+        if (app_status.is_hid_mounted || app_status.is_msc_mounted) {
+            display.print("/");
+        }
+        display.print("cdc");
     }
     display.display();
 
     app_status.redraw_status = false;
+    app_status.redraw_status_completed = true;
   }
 
   handle_button();
@@ -271,49 +309,53 @@ void loop() {
 
   if (KeyboardHost.available() > 0) {
     char ch = (char)KeyboardHost.read();
-    input_buffer.push(ch);
+    if (ch != '\n' && !textBuffer.is_full()) {
+        textBuffer.append_char(ch);
 
-    if (ch == '\n') {
-      input_buffer.pop(NULL);
-      input_buffer.push('\r');
-      input_buffer.push('\n');
-      size_t i = 0;
-      for (i = 0; !input_buffer.is_empty(); i++) {
-        input_buffer.pop(&buf[i]);
-        if (i == (buflen - 3)) {
-          buf[buflen - 2] = '\r';
-          buf[buflen - 1] = '\n';
-          break;
-        }
-      }
+    } else { // ch == '\n' or buffer is full.
       display.setCursor(0, 24);
       display.setTextSize(1);
       display.fillRect(0, 24, 128, 8, SSD1306_BLACK);
-      display.print(buf);
+      display.print(textBuffer.get_str());
       display.display();
-      status_clear_timer = millis() + 3000;
-      write_log(buf);
+      request_clear_after_millis(3000);
+
+      if (!write_log(textBuffer.get_str()) && app_status.is_msc_mounted) {
+        delay(500);
+        display.setCursor(0, 24);
+        display.setTextSize(1);
+        display.fillRect(0, 24, 128, 8, SSD1306_BLACK);
+        display.print("MSC Error");
+        display.display();
+      }
 
       if (app_status.is_passthrough_enabled) {
-        write_with_clock(Serial, buf);
+        write_with_clock(Serial, textBuffer.get_str());
+        Serial.flush();
       }
+
+      textBuffer.clear();
     }
   }
 }
 
-void write_log(const char* msg) {
-  if (!MassStorageHost.mounted()) { return; }
+bool write_log(const char* msg) {
+  if (!MassStorageHost.mounted()) { return false; }
 
   MscFile log_file = MassStorageHost.open("/log.txt", O_CREAT | O_RDWR | O_APPEND);
-  if (!log_file) { return; }
+  if (!log_file) { return false; }
 
   write_with_clock(log_file, msg);
+  log_file.flush();
   log_file.close();
+
+  return true;
 }
 
 void write_with_clock(Stream& stream, const char* msg) {
   stream.printf("%02d:%02d:%02d\t", Clock.get_hour(), Clock.get_minute(), Clock.get_second());
-  stream.printf("%s", msg);
+  stream.print(msg);
+  stream.print("\r\n");
 }
 
 void draw_app_banner() {
@@ -370,8 +412,18 @@ void handle_button() {
     is_press_started = false;
     display.clearDisplay();
     draw_app_banner();
-    app_status.redraw_status = true;
+    request_redraw_status();
   }
+}
+
+void request_redraw_status() {
+    app_status.redraw_status = true;
+    app_status.redraw_status_completed = false;
+}
+
+void request_clear_after_millis(uint32_t millis_after) {
+    app_status.status_clear_timer = millis() + millis_after;
+    app_status.redraw_status_completed = false;
 }
 
 void set_clock() {
@@ -436,55 +488,100 @@ void set_clock() {
   display.setTextSize(1);
   display.printf("Clock: %02d:%02d:%02d\r\n", Clock.get_hour(), Clock.get_minute(), Clock.get_second());
   display.display();
-  status_clear_timer = millis() + 3000;
+  request_clear_after_millis(3000);
 }
 
 void handle_serial() {
   if (Serial.available() == 0) { return; }
   String input = Serial.readStringUntil('\n');
   input.trim();
+
   if (input.equals("status")) {
     Serial.println("+OK");
     if (!KeyboardHost.mounted()) {
-        Serial.printf("HID: unmounted%s\r\n");
+        Serial.println("HID: unmounted");
     } else {
-        Serial.printf("HID: mounted(0x%04x,0x%04x)\r\n", app_status.hid_vid, app_status.hid_pid);
+        Serial.printf("HID: mounted(0x%04x,0x%04x)", app_status.hid_vid, app_status.hid_pid);
+        Serial.println();
     }
     if (!MassStorageHost.mounted()) {
-        Serial.printf("MSC: unmounted%s\r\n");
+        Serial.println("MSC: unmounted");
     } else {
-        Serial.printf("MSC: mounted(0x%04x,0x%04x)\r\n", app_status.msc_vid, app_status.msc_pid);
+        Serial.printf("MSC: mounted(0x%04x,0x%04x)", app_status.msc_vid, app_status.msc_pid);
+        Serial.println();
     }
     {
         uint8_t h, m, s;
         Clock.get_clock(&h, &m, &s);
-        Serial.printf("Clock: %02d:%02d:%02d\r\n", h, m, s);
+        Serial.printf("Clock: %02d:%02d:%02d", h, m, s);
+        Serial.println();
     }
-    Serial.println();
     return;
 
-  } else if (input.startsWith("read ")) {
-    int offset, length;
-    sscanf(input.c_str(), "read %d,%d", &offset, &length);
-    if (length > 256) {
-      Serial.println("-ERR: length should be equal or less than 256");
+  } else if (input.startsWith("log get size")) {
+      if (!MassStorageHost.mounted()) {
+          Serial.println("-ERR: Not mounted.");
+          return;
+      }
+      MscFile file = MassStorageHost.open("/log.txt", O_RDONLY);
+      if (!file) {
+          Serial.println("-ERR: log file not found.");
+          return;
+      }
+      size_t filesize = file.size();
+      file.close();
+      Serial.printf("+OK: filesize=%u", filesize);
       Serial.println();
-      return;
-    }
+
+  } else if (input.startsWith("log read ")) {
+    uint32_t offset, length;
+    sscanf(input.c_str(), "log read %u,%u", &offset, &length);
     MscFile file = MassStorageHost.open("/log.txt", O_RDONLY);
     if (!file) {
       Serial.println("-ERR: file not found");
       Serial.println();
       return;
     }
+    size_t filesize = file.size();
+    if (offset > filesize) {
+        Serial.println("-ERR: Invalid offset");
+        file.close();
+        return;
+    }
+    if (offset + length > filesize) {
+        Serial.println("-ERR: Invalid length");
+        file.close();
+        return;
+    }
     file.seek(offset);
-    uint8_t buf[length] = {};
-    size_t readlen = file.read(buf, length);
+    Serial.printf("+OK: offset=%d,length=%d", offset, length);
+    Serial.println();
+    uint8_t buf[64];
+    while (length > 0) {
+        size_t chunksize = 63;
+        if (chunksize > length) {
+           chunksize = length;
+        }
+        size_t readlen = file.read(buf, chunksize);
+        Serial.write(buf, readlen);
+        Serial.flush();
+        length -= readlen;
+    }
     file.close();
-    Serial.printf("+OK: length=%u\r\n", readlen);
-    Serial.write(buf, readlen);
     Serial.println();
-    Serial.println();
+
+  } else if (input.equals("log clear")) {
+      if (!MassStorageHost.mounted()) {
+          Serial.println("-ERR: Not mounted.");
+          return;
+      }
+      MscFile file = MassStorageHost.open("/log.txt", O_CREAT | O_WRITE | O_TRUNC);
+      if (!file) {
+          Serial.println("-ERR: log file not found.");
+          return;
+      }
+      file.close();
+      Serial.println("+OK: log file cleared.");
 
   } else if (input.startsWith("clock set ")) {
     unsigned int h = 9, m = 0, s = 0;
@@ -493,7 +590,7 @@ void handle_serial() {
         Serial.println("-ERR: Invalid input.");
     } else {
         Clock.set_clock(h, m, s);
-        Serial.printf("+OK: Clock is now %02d:%02d:%02d\r\n", h, m, s);
+        Serial.printf("+OK: Clock is now %02d:%02d:%02d", h, m, s);
         Serial.println();
     }
     return;
