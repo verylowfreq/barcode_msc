@@ -113,10 +113,29 @@ public:
     size_t capacity() const {
         return BUFLEN - 1;
     }
+
+    void trim_end() {
+        while (end > 0 &&
+               (buffer[end - 1] == ' ' ||
+                buffer[end - 1] == '\t' ||
+                buffer[end - 1] == '\r' ||
+                buffer[end - 1] == '\n')) {
+          end -= 1;
+        }
+        buffer[end] = '\0';
+    }
+
+    bool equals(const char* s) {
+        return strcmp(get_str(), s) == 0;
+    }
+
+    bool starts_with(const char* s) {
+        return strncmp(get_str(), s, strlen(s)) == 0;
+    }
 };
 
 static TextBuffer<256> textBuffer;
-
+static TextBuffer<128> input_buffer;
 
 class ClockManager {
 public:
@@ -321,7 +340,6 @@ void loop() {
       request_clear_after_millis(3000);
 
       if (!write_log(textBuffer.get_str()) && app_status.is_msc_mounted) {
-        delay(500);
         display.setCursor(0, 24);
         display.setTextSize(1);
         display.fillRect(0, 24, 128, 8, SSD1306_BLACK);
@@ -492,120 +510,134 @@ void set_clock() {
 }
 
 void handle_serial() {
-  if (Serial.available() == 0) { return; }
-  String input = Serial.readStringUntil('\n');
-  input.trim();
-
-  if (input.equals("status")) {
-    Serial.println("+OK");
-    if (!KeyboardHost.mounted()) {
-        Serial.println("HID: unmounted");
-    } else {
-        Serial.printf("HID: mounted(0x%04x,0x%04x)", app_status.hid_vid, app_status.hid_pid);
-        Serial.println();
-    }
-    if (!MassStorageHost.mounted()) {
-        Serial.println("MSC: unmounted");
-    } else {
-        Serial.printf("MSC: mounted(0x%04x,0x%04x)", app_status.msc_vid, app_status.msc_pid);
-        Serial.println();
-    }
-    {
-        uint8_t h, m, s;
-        Clock.get_clock(&h, &m, &s);
-        Serial.printf("Clock: %02d:%02d:%02d", h, m, s);
-        Serial.println();
-    }
-    return;
-
-  } else if (input.startsWith("log get size")) {
-      if (!MassStorageHost.mounted()) {
-          Serial.println("-ERR: Not mounted.");
-          return;
-      }
-      MscFile file = MassStorageHost.open("/log.txt", O_RDONLY);
-      if (!file) {
-          Serial.println("-ERR: log file not found.");
-          return;
-      }
-      size_t filesize = file.size();
-      file.close();
-      Serial.printf("+OK: filesize=%u", filesize);
-      Serial.println();
-
-  } else if (input.startsWith("log read ")) {
-    uint32_t offset, length;
-    sscanf(input.c_str(), "log read %u,%u", &offset, &length);
-    MscFile file = MassStorageHost.open("/log.txt", O_RDONLY);
-    if (!file) {
-      Serial.println("-ERR: file not found");
-      Serial.println();
-      return;
-    }
-    size_t filesize = file.size();
-    if (offset > filesize) {
-        Serial.println("-ERR: Invalid offset");
-        file.close();
+  while (Serial.available() > 0) {
+    char ch = (char)Serial.read();
+    if (!input_buffer.append_char(ch)) {
+        Serial.println("-ERR: input too long");
+        input_buffer.clear();
         return;
     }
-    if (offset + length > filesize) {
-        Serial.println("-ERR: Invalid length");
-        file.close();
-        return;
-    }
-    file.seek(offset);
-    Serial.printf("+OK: offset=%d,length=%d", offset, length);
-    Serial.println();
-    uint8_t buf[64];
-    while (length > 0) {
-        size_t chunksize = 63;
-        if (chunksize > length) {
-           chunksize = length;
+
+    if (ch != '\n') { continue; }
+    input_buffer.trim_end();
+
+    if (input_buffer.equals("status")) {
+        Serial.println("+OK");
+        if (!KeyboardHost.mounted()) {
+            Serial.println("HID: unmounted");
+        } else {
+            Serial.printf("HID: mounted(0x%04x,0x%04x)", app_status.hid_vid, app_status.hid_pid);
+            Serial.println();
         }
-        size_t readlen = file.read(buf, chunksize);
-        Serial.write(buf, readlen);
-        Serial.flush();
-        length -= readlen;
-    }
-    file.close();
-    Serial.println();
+        if (!MassStorageHost.mounted()) {
+            Serial.println("MSC: unmounted");
+        } else {
+            Serial.printf("MSC: mounted(0x%04x,0x%04x)", app_status.msc_vid, app_status.msc_pid);
+            Serial.println();
+        }
+        {
+            uint8_t h, m, s;
+            Clock.get_clock(&h, &m, &s);
+            Serial.printf("Clock: %02d:%02d:%02d", h, m, s);
+            Serial.println();
+        }
 
-  } else if (input.equals("log clear")) {
-      if (!MassStorageHost.mounted()) {
-          Serial.println("-ERR: Not mounted.");
-          return;
-      }
-      MscFile file = MassStorageHost.open("/log.txt", O_CREAT | O_WRITE | O_TRUNC);
-      if (!file) {
-          Serial.println("-ERR: log file not found.");
-          return;
-      }
-      file.close();
-      Serial.println("+OK: log file cleared.");
-
-  } else if (input.startsWith("clock set ")) {
-    unsigned int h = 9, m = 0, s = 0;
-    int num_of_fields = sscanf(input.c_str(), "clock set %u:%u:%u", &h, &m, &s);
-    if (num_of_fields != 3) {
-        Serial.println("-ERR: Invalid input.");
-    } else {
-        Clock.set_clock(h, m, s);
-        Serial.printf("+OK: Clock is now %02d:%02d:%02d", h, m, s);
+    } else if (input_buffer.equals("log get size")) {
+        do {
+        if (!MassStorageHost.mounted()) {
+            Serial.println("-ERR: Not mounted.");
+            break;
+        }
+        MscFile file = MassStorageHost.open("/log.txt", O_RDONLY);
+        if (!file) {
+            Serial.println("-ERR: log file not found.");
+            break;
+        }
+        size_t filesize = file.size();
+        file.close();
+        Serial.printf("+OK: filesize=%u", filesize);
         Serial.println();
+        } while (false);
+
+    } else if (input_buffer.starts_with("log read ")) {
+        do {
+            uint32_t offset, length;
+            sscanf(input_buffer.get_str(), "log read %u,%u", &offset, &length);
+            MscFile file = MassStorageHost.open("/log.txt", O_RDONLY);
+            if (!file) {
+            Serial.println("-ERR: file not found");
+            Serial.println();
+            return;
+            }
+            size_t filesize = file.size();
+            if (offset > filesize) {
+                Serial.println("-ERR: Invalid offset");
+                file.close();
+                return;
+            }
+            if (offset + length > filesize) {
+                Serial.println("-ERR: Invalid length");
+                file.close();
+                return;
+            }
+            file.seek(offset);
+            Serial.printf("+OK: offset=%d,length=%d", offset, length);
+            Serial.println();
+            uint8_t buf[64];
+            while (length > 0) {
+                size_t chunksize = 63;
+                if (chunksize > length) {
+                chunksize = length;
+                }
+                size_t readlen = file.read(buf, chunksize);
+                Serial.write(buf, readlen);
+                Serial.flush();
+                length -= readlen;
+            }
+            file.close();
+            Serial.println();
+        } while (false);
+
+    } else if (input_buffer.equals("log clear")) {
+        do {
+            if (!MassStorageHost.mounted()) {
+                Serial.println("-ERR: Not mounted.");
+                break;
+            }
+            MscFile file = MassStorageHost.open("/log.txt", O_CREAT | O_WRITE | O_TRUNC);
+            if (!file) {
+            Serial.println("-ERR: log file not found.");
+            break;
+            }
+            file.close();
+            Serial.println("+OK: log file cleared.");
+        } while (false);
+
+    } else if (input_buffer.starts_with("clock set ")) {
+        unsigned int h = 9, m = 0, s = 0;
+        int num_of_fields = sscanf(input_buffer.get_str(), "clock set %u:%u:%u", &h, &m, &s);
+        if (num_of_fields != 3) {
+            Serial.println("-ERR: Invalid input.");
+        } else {
+            Clock.set_clock(h, m, s);
+            Serial.printf("+OK: Clock is now %02d:%02d:%02d", h, m, s);
+            Serial.println();
+        }
+
+    } else if (input_buffer.starts_with("dump set ")) {
+        if (input_buffer.equals("dump set on")) {
+            app_status.is_passthrough_enabled = true;
+            Serial.println("+OK: passthrough enabled.");
+        } else {
+            app_status.is_passthrough_enabled = false;
+            Serial.println("+OK: passthrough disabled.");
+        }
+
+    } else {
+        Serial.println("-ERR: Unknown command.");
     }
+
+    input_buffer.clear();
     return;
-
-  } else if (input.startsWith("dump set ")) {
-      if (input.equals("dump set on")) {
-          app_status.is_passthrough_enabled = true;
-          Serial.println("+OK: passthrough enabled.");
-      } else {
-          app_status.is_passthrough_enabled = false;
-          Serial.println("+OK: passthrough disabled.");
-      }
-      return;
-
-  } else {
-    Serial.println("-ERR: Unknown command.");
   }
 }
