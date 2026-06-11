@@ -270,7 +270,8 @@ const debugPanel = document.getElementById('debug-panel');
 let debugVisible = false;
 
 function dbg(cls, ...parts) {
-  const ts = new Date().toISOString().slice(11, 23);
+  const now = new Date();
+  const ts = `${String(now.getHours()).padStart(2, '0')}:${String(now.getMinutes()).padStart(2, '0')}:${String(now.getSeconds()).padStart(2, '0')}.${String(now.getMilliseconds()).padStart(3, '0')}`;
   const msg = parts.join(' ');
   console.log(`[HIDLogger ${ts}] ${msg}`);
   const div = document.createElement('div');
@@ -509,7 +510,7 @@ class Device {
       const first = await this._readLine();
       if (!first.startsWith('+OK')) throw new Error(first);
       const r = {};
-      for (let i = 0; i < 3; i++) {
+      for (let i = 0; i < 5; i++) {
         const l = await this._readLine();
         const c = l.indexOf(': ');
         if (c !== -1) r[l.slice(0, c).toLowerCase()] = l.slice(c + 2);
@@ -517,6 +518,24 @@ class Device {
       }
       dbg('info', 'getStatus result:', JSON.stringify(r));
       return r;
+    });
+  }
+
+  async connectSession() {
+    return this._cmd(async () => {
+      await this._send('connect');
+      const l = await this._readLine();
+      if (!l.startsWith('+OK')) throw new Error(l);
+      return l;
+    });
+  }
+
+  async disconnectSession() {
+    return this._cmd(async () => {
+      await this._send('disconnect');
+      const l = await this._readLine();
+      if (!l.startsWith('+OK')) throw new Error(l);
+      return l;
     });
   }
 
@@ -751,7 +770,7 @@ class MidiDevice {
       const first = await this._readLine();
       if (!first.startsWith('+OK')) throw new Error(first);
       const r = {};
-      for (let i = 0; i < 3; i++) {
+      for (let i = 0; i < 5; i++) {
         const l = await this._readLine();
         const c = l.indexOf(': ');
         if (c !== -1) r[l.slice(0, c).toLowerCase()] = l.slice(c + 2);
@@ -759,6 +778,24 @@ class MidiDevice {
       }
       dbg('info', 'MIDI getStatus:', JSON.stringify(r));
       return r;
+    });
+  }
+
+  async connectSession() {
+    return this._cmd(async () => {
+      await this._send('connect');
+      const l = await this._readLine();
+      if (!l.startsWith('+OK')) throw new Error(l);
+      return l;
+    });
+  }
+
+  async disconnectSession() {
+    return this._cmd(async () => {
+      await this._send('disconnect');
+      const l = await this._readLine();
+      if (!l.startsWith('+OK')) throw new Error(l);
+      return l;
     });
   }
 
@@ -859,6 +896,7 @@ document.querySelectorAll('.tab-btn').forEach(b => {
     document.querySelectorAll('.tab-content').forEach(x => x.classList.remove('active'));
     b.classList.add('active');
     $('tab-' + b.dataset.tab).classList.add('active');
+    if (b.dataset.tab === 'clock') syncClockInputsToNow();
   });
 });
 
@@ -904,6 +942,7 @@ async function doConnect() {
     const port = await serial.requestPort();
     dbg('info', 'port selected, connecting...');
     await device.connect(port);
+    await device.connectSession();
     device.onDisconnect = () => {
       dbg('info', 'device disconnected');
       setConnected(false);
@@ -925,6 +964,7 @@ async function doDisconnect() {
     try { await device.setPassthrough(false); } catch {}
     ptActive = false; updatePtBtn();
   }
+  try { await device.disconnectSession(); } catch {}
   await device.disconnect();
   setConnected(false);
 }
@@ -957,6 +997,7 @@ async function doMidiConnect() {
     }
 
     await midiDev.connect(midiAccess, input, output);
+    await midiDev.connectSession();
     midiDev.onDisconnect = () => {
       dbg('info', 'MIDI device disconnected');
       setConnected(false);
@@ -1148,12 +1189,14 @@ $('btn-clear-feed').addEventListener('click', () => {
 
 // ── Clock tab ──
 
-$('btn-sync').addEventListener('click', () => {
+function syncClockInputsToNow() {
   const n = new Date();
   $('c-h').value = n.getHours();
   $('c-m').value = n.getMinutes();
   $('c-s').value = n.getSeconds();
-});
+}
+
+$('btn-sync').addEventListener('click', syncClockInputsToNow);
 
 $('btn-setclock').addEventListener('click', async () => {
   const h = Math.min(23, Math.max(0, parseInt($('c-h').value) || 0));
@@ -1200,5 +1243,7 @@ $('btn-setclock').addEventListener('click', async () => {
 </script>
 </body>
 </html>
+
+
 
 

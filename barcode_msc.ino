@@ -1,4 +1,4 @@
-﻿/** Required libraries:
+/** Required libraries:
  * - Adafruit GFX
  * - Adafruit SSD1306
  */
@@ -23,12 +23,13 @@ constexpr int PIN_BTN_1 = PB12;
 constexpr int PIN_BTN_2 = PB13;
 constexpr int PIN_BTN_3 = PB14;
 
-constexpr bool ENABLE_DEBUG_SERIAL = true;
-constexpr unsigned long DEBUG_SERIAL_WAIT_INTERVAL_MS = 10;
+constexpr unsigned long TRANSPORT_SWITCH_PRESS_DURATION_MS = 3000;
 
-#define DEBUG_LOG(msg) do { if (ENABLE_DEBUG_SERIAL && Serial) { Serial.println(msg); Serial.flush(); } } while (0)
-#define DEBUG_LOGF(...) do { if (ENABLE_DEBUG_SERIAL && Serial) { Serial.printf(__VA_ARGS__); Serial.print("\r\n"); Serial.flush(); } } while (0)
-
+constexpr uint16_t BKP_MAGIC_BOOTLOADER = 0x624c;
+constexpr uint16_t BKP_MAGIC_TRANSPORT = 0x5452;
+constexpr uint16_t BKP_MAGIC_CLOCK = 0x434c;
+constexpr uint16_t BKP_TRANSPORT_CDC = 0x4344;
+constexpr uint16_t BKP_TRANSPORT_MIDI = 0x4d49;
 
 #define SCREEN_ADDRESS 0x3C
 // Adafruit_SSD1306(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire, OLED_RESET)
@@ -87,7 +88,6 @@ public:
 
     void flush() override {
         if (outbuffer.length() == 0) { return; }
-        DEBUG_LOGF("[MIDI TX] flush len=%u mounted=%d text=\"%s\"", outbuffer.length(), TinyUSBDevice.mounted() ? 1 : 0, outbuffer.get_str());
 
         uint8_t packet[4] = {0x04, 0, 0, 0};
         uint8_t packet_len = 0;
@@ -199,6 +199,9 @@ typedef struct {
 
     // This device is mounted as CDC device from PC.
     bool is_cdc_device_mounted;
+    bool is_midi_device_connected;
+    bool is_cdc_session_connected;
+    bool is_midi_session_connected;
 } app_status_t;
 
 static app_status_t app_status;
@@ -218,11 +221,93 @@ static uint8_t fromHexChar(uint8_t c) {
     return 0;
 }
 
-void wait_for_debug_serial() {
-    if (!ENABLE_DEBUG_SERIAL) { return; }
-    while (!Serial) {
-        delay(DEBUG_SERIAL_WAIT_INTERVAL_MS);
+void enable_backup_access() {
+    RCC_APB1PeriphClockCmd(RCC_APB1Periph_PWR | RCC_APB1Periph_BKP, ENABLE);
+    PWR_BackupAccessCmd(ENABLE);
+}
+
+void save_transport_to_backup(transport_t transport) {
+    enable_backup_access();
+    BKP_WriteBackupRegister(BKP_DR1, BKP_MAGIC_TRANSPORT);
+    BKP_WriteBackupRegister(BKP_DR2, transport == TRANSPORT_MIDI ? BKP_TRANSPORT_MIDI : BKP_TRANSPORT_CDC);
+}
+
+transport_t load_transport_from_backup() {
+    enable_backup_access();
+    if (BKP_ReadBackupRegister(BKP_DR1) != BKP_MAGIC_TRANSPORT) {
+        return TRANSPORT_CDC;
     }
+    transport_t transport = (BKP_ReadBackupRegister(BKP_DR2) == BKP_TRANSPORT_MIDI) ? TRANSPORT_MIDI : TRANSPORT_CDC;
+    BKP_WriteBackupRegister(BKP_DR1, 0);
+    BKP_WriteBackupRegister(BKP_DR2, 0);
+    return transport;
+}
+
+void save_clock_to_backup() {
+    uint8_t h, m, s;
+    Clock.get_clock(&h, &m, &s);
+    enable_backup_access();
+    BKP_WriteBackupRegister(BKP_DR3, BKP_MAGIC_CLOCK);
+    BKP_WriteBackupRegister(BKP_DR4, h);
+    BKP_WriteBackupRegister(BKP_DR5, m);
+    BKP_WriteBackupRegister(BKP_DR6, s);
+}
+
+bool load_clock_from_backup(uint8_t* h, uint8_t* m, uint8_t* s) {
+    enable_backup_access();
+    if (BKP_ReadBackupRegister(BKP_DR3) != BKP_MAGIC_CLOCK) {
+        return false;
+    }
+    uint16_t hh = BKP_ReadBackupRegister(BKP_DR4);
+    uint16_t mm = BKP_ReadBackupRegister(BKP_DR5);
+    uint16_t ss = BKP_ReadBackupRegister(BKP_DR6);
+    if (hh >= 24 || mm >= 60 || ss >= 60) {
+        return false;
+    }
+    if (h) { *h = (uint8_t)hh; }
+    if (m) { *m = (uint8_t)mm; }
+    if (s) { *s = (uint8_t)ss; }
+    return true;
+}
+
+bool is_transport_connected() {
+    if (app_status.transport == TRANSPORT_CDC) {
+        return Serial;
+    }
+    return app_status.is_midi_device_connected;
+}
+
+bool is_session_connected(transport_t transport) {
+    return (transport == TRANSPORT_MIDI) ? app_status.is_midi_session_connected
+                                         : app_status.is_cdc_session_connected;
+}
+
+void set_session_connected(transport_t transport, bool connected) {
+    bool* session_flag = (transport == TRANSPORT_MIDI)
+        ? &app_status.is_midi_session_connected
+        : &app_status.is_cdc_session_connected;
+
+    if (*session_flag != connected) {
+        *session_flag = connected;
+        request_redraw_status();
+    }
+}
+
+void show_footer_message(const char* msg, uint32_t clear_after_ms) {
+    display.setTextColor(SSD1306_WHITE);
+    display.setTextSize(1);
+    display.fillRect(0, 24, 128, 8, SSD1306_BLACK);
+    display.setCursor(0, 24);
+    display.print(msg);
+    display.display();
+    request_clear_after_millis(clear_after_ms);
+}
+
+void reboot_with_transport(transport_t transport) {
+    save_transport_to_backup(transport);
+    show_footer_message(transport == TRANSPORT_MIDI ? "Switch->midi" : "Switch->cdc", 3000);
+    delay(300);
+    NVIC_SystemReset();
 }
 
 static char midi_rx_hex_buffer[128] = {};
@@ -230,7 +315,6 @@ static size_t midi_rx_hex_length = 0;
 
 void decode_midi_sysex_buffer() {
     if ((midi_rx_hex_length & 1) != 0) {
-        DEBUG_LOGF("[MIDI RX] odd hex length=%u", midi_rx_hex_length);
         midi_rx_hex_length = 0;
         midi_rx_hex_buffer[0] = '\0';
         return;
@@ -239,12 +323,9 @@ void decode_midi_sysex_buffer() {
     for (size_t i = 0; i + 1 < midi_rx_hex_length; i += 2) {
         const uint8_t b = (fromHexChar(midi_rx_hex_buffer[i]) << 4) | fromHexChar(midi_rx_hex_buffer[i + 1]);
         if (!midi_input_buffer.push_back(b)) {
-            DEBUG_LOG("[MIDI RX] input buffer overflow");
             break;
         }
     }
-
-    DEBUG_LOGF("[MIDI RX] decoded bytes=%u", midi_input_buffer.available());
     midi_rx_hex_length = 0;
     midi_rx_hex_buffer[0] = '\0';
 }
@@ -260,13 +341,11 @@ void handle_midi_byte(uint8_t b) {
     }
 
     if (b == 0xF7) {
-        DEBUG_LOGF("[MIDI RX] SysEx size=%u", midi_rx_hex_length + 2);
         decode_midi_sysex_buffer();
         return;
     }
 
     if (midi_rx_hex_length + 1 >= sizeof(midi_rx_hex_buffer)) {
-        DEBUG_LOG("[MIDI RX] hex buffer overflow");
         midi_rx_hex_length = 0;
         midi_rx_hex_buffer[0] = '\0';
         return;
@@ -279,7 +358,10 @@ void handle_midi_byte(uint8_t b) {
 void poll_midi_rx() {
     uint8_t packet[4];
     while (USB_MIDI.readPacket(packet)) {
-        DEBUG_LOGF("[MIDI RX] packet=%02x %02x %02x %02x", packet[0], packet[1], packet[2], packet[3]);
+        if (!app_status.is_midi_device_connected) {
+            app_status.is_midi_device_connected = true;
+            request_redraw_status();
+        }
         const uint8_t cin = packet[0] & 0x0f;
         size_t payload_len = 0;
         if (cin == 0x04 || cin == 0x07) {
@@ -328,11 +410,7 @@ void setup() {
       reboot_bootloader();
   }
 
-  if (digitalRead(PIN_BTN_2) == LOW) {
-    app_status.transport = TRANSPORT_MIDI;
-  } else {
-    app_status.transport = TRANSPORT_CDC;
-  }
+  app_status.transport = load_transport_from_backup();
 
 
   if (app_status.transport == TRANSPORT_CDC) {
@@ -341,17 +419,18 @@ void setup() {
     Serial.begin(115200);
 
     } else if (app_status.transport == TRANSPORT_MIDI) {
-        if (ENABLE_DEBUG_SERIAL) {
-            Serial.setStringDescriptor("HID Logger (Debug)");
-            TinyUSBDevice.addInterface(Serial);
-            Serial.begin(115200);
-        }
         MIDI_Stream.begin();
         USB_MIDI.setStringDescriptor("HID Logger (MIDI)");
         USB_MIDI.begin();
     }
 
   Clock.begin();
+  {
+    uint8_t h = 0, m = 0, s = 0;
+    if (load_clock_from_backup(&h, &m, &s)) {
+      Clock.set_clock(h, m, s);
+    }
+  }
   // Serial.printf("Clock: %02d:%02d:%02d\r\n", Clock.get_hour(), Clock.get_minute(), Clock.get_second());
 
   KeyboardHost.onMount([](uint8_t dev_addr, uint8_t instance, uint16_t vid, uint16_t pid) {
@@ -410,21 +489,16 @@ void setup() {
     TinyUSBDevice.attach();
   }
 
-  if (app_status.transport == TRANSPORT_MIDI && ENABLE_DEBUG_SERIAL) {
-    display.setTextSize(1);
-    display.setCursor(0, 24);
-    display.fillRect(0, 24, 128, 8, SSD1306_BLACK);
-    display.print("Wait CDC...");
-    display.display();
-    wait_for_debug_serial();
-    DEBUG_LOG("[BOOT] debug serial connected");
-    DEBUG_LOGF("[BOOT] transport=%s", app_status.transport == TRANSPORT_MIDI ? "MIDI" : "CDC");
-  }
-
   display.setTextSize(1);
   display.setCursor(0, 24);
-  display.print("Ready.");
+  display.print("Ready.  ");
+  if (app_status.transport == TRANSPORT_CDC) {
+    display.print("(cdc)");
+  } else {
+    display.print("(midi)");
+  }
   display.display();
+  delay(2000);
   request_clear_after_millis(3000);
 }
 
@@ -437,6 +511,7 @@ void loop() {
       request_redraw_status();
   } else if (app_status.is_cdc_device_mounted && !Serial) {
       app_status.is_cdc_device_mounted = false;
+      app_status.is_cdc_session_connected = false;
       request_redraw_status();
   }
 
@@ -445,7 +520,9 @@ void loop() {
     display.fillRect(0, 24, 128, 8, SSD1306_BLACK);
     display.setTextSize(1);
     display.setCursor(0, 24);
-    if (app_status.is_hid_mounted || app_status.is_msc_mounted || Serial) {
+    const bool is_cdc_connected = app_status.is_cdc_session_connected;
+    const bool is_midi_connected = app_status.is_midi_session_connected;
+    if (app_status.is_hid_mounted || app_status.is_msc_mounted || is_cdc_connected || is_midi_connected) {
         display.print("Conn: ");
     }
     if (app_status.is_hid_mounted) {
@@ -457,11 +534,19 @@ void loop() {
         }
         display.print("MSC");
     }
-    if (Serial) {
+    if (is_cdc_connected || is_midi_connected) {
         if (app_status.is_hid_mounted || app_status.is_msc_mounted) {
             display.print("/");
         }
-        display.print("cdc");
+        if (is_cdc_connected) {
+            display.print("cdc");
+        }
+        if (is_midi_connected) {
+            if (is_cdc_connected) {
+                display.print("/");
+            }
+            display.print("midi");
+        }
     }
     display.display();
 
@@ -472,9 +557,9 @@ void loop() {
   handle_button();
 
   if (app_status.transport == TRANSPORT_CDC) {
-      handle_comm(Serial);
+      handle_comm(Serial, TRANSPORT_CDC);
   } else if (app_status.transport == TRANSPORT_MIDI) {
-    handle_comm(MIDI_Stream);
+    handle_comm(MIDI_Stream, TRANSPORT_MIDI);
     MIDI_Stream.flush();
   }
 
@@ -552,21 +637,22 @@ void reboot_bootloader() {
   display.print("(bootloader)");
   display.display();
 
-  RCC_APB1PeriphClockCmd(RCC_APB1Periph_PWR | RCC_APB1Periph_BKP, ENABLE);
-  PWR_BackupAccessCmd(ENABLE);
-  BKP_WriteBackupRegister(BKP_DR10, 0x624c);
+  enable_backup_access();
+  BKP_WriteBackupRegister(BKP_DR10, BKP_MAGIC_BOOTLOADER);
   NVIC_SystemReset();
 }
 
 
 void handle_button() {
 
-  static bool is_press_started = false;
-  static unsigned long press_start_millis = 0;
+  static bool is_clock_press_started = false;
+  static unsigned long clock_press_start_millis = 0;
+  static bool is_transport_press_started = false;
+  static unsigned long transport_press_start_millis = 0;
   if (digitalRead(PIN_BTN_1) == LOW) {
-    if (!is_press_started) {
-      press_start_millis = millis();
-      is_press_started = true;
+    if (!is_clock_press_started) {
+      clock_press_start_millis = millis();
+      is_clock_press_started = true;
       display.clearDisplay();
       display.setCursor(0, 0);
       display.setTextSize(2);
@@ -574,18 +660,52 @@ void handle_button() {
       display.display();
     } else {
       const unsigned long press_duration = 2000;
-      unsigned long elapsed = millis() - press_start_millis;
+      unsigned long elapsed = millis() - clock_press_start_millis;
       uint8_t width = elapsed * 128 / press_duration;
       display.fillRect(0, 16, width, 4, SSD1306_WHITE);
       display.display();
       if (elapsed >= press_duration) {
         while (digitalRead(PIN_BTN_1) == LOW) { delay(10); }
         set_clock();
-        is_press_started = false;
+        is_clock_press_started = false;
       }
     }
-  } else if (is_press_started) {
-    is_press_started = false;
+  } else if (is_clock_press_started) {
+    is_clock_press_started = false;
+    display.clearDisplay();
+    draw_app_banner();
+    request_redraw_status();
+  }
+
+  if (digitalRead(PIN_BTN_2) == LOW) {
+    if (!is_transport_press_started) {
+      transport_press_start_millis = millis();
+      is_transport_press_started = true;
+      display.clearDisplay();
+      display.setCursor(0, 0);
+      display.setTextSize(2);
+      display.println("Transport");
+      display.setTextSize(1);
+      display.setCursor(0, 24);
+      display.print(app_status.transport == TRANSPORT_MIDI ? "midi -> cdc" : "cdc -> midi");
+      display.display();
+    } else {
+      unsigned long elapsed = millis() - transport_press_start_millis;
+      uint8_t width = elapsed * 128 / TRANSPORT_SWITCH_PRESS_DURATION_MS;
+      display.fillRect(0, 16, width, 4, SSD1306_WHITE);
+      display.display();
+      if (elapsed >= TRANSPORT_SWITCH_PRESS_DURATION_MS) {
+        while (digitalRead(PIN_BTN_2) == LOW) { delay(10); }
+        is_transport_press_started = false;
+        // if (is_transport_connected()) {
+        //   show_footer_message("PC Connected", 3000);
+        //   return;
+        // }
+        reboot_with_transport(app_status.transport == TRANSPORT_MIDI ? TRANSPORT_CDC : TRANSPORT_MIDI);
+      }
+    }
+  } else if (is_transport_press_started) {
+    is_transport_press_started = false;
     display.clearDisplay();
     draw_app_banner();
     request_redraw_status();
@@ -655,6 +775,7 @@ void set_clock() {
     uint8_t m = digits[2] * 10 + digits[3];
     uint8_t s = digits[4] * 10 + digits[5];
     Clock.set_clock(h, m, s);
+    save_clock_to_backup();
   }
 
   display.clearDisplay();
@@ -667,23 +788,29 @@ void set_clock() {
   request_clear_after_millis(3000);
 }
 
-void handle_comm(Stream& stream) {
+void handle_comm(Stream& stream, transport_t source_transport) {
   while (stream.available() > 0) {
     char ch = (char)stream.read();
-    DEBUG_LOGF("[COMM] read ch=0x%02x '%c'", (uint8_t)ch, (ch >= 0x20 && ch <= 0x7e) ? ch : '.');
     if (!input_buffer.append_char(ch)) {
         stream.println("-ERR: input too long");
-        DEBUG_LOG("[COMM] input buffer overflow");
         input_buffer.clear();
         return;
     }
 
     if (ch != '\n') { continue; }
     input_buffer.trim_end();
-    DEBUG_LOGF("[COMM] command=\"%s\"", input_buffer.get_str());
 
-    if (input_buffer.equals("status")) {
-        DEBUG_LOG("[COMM] status");
+    if (input_buffer.equals("connect")) {
+        set_session_connected(source_transport, true);
+        stream.printf("+OK: %s connected", source_transport == TRANSPORT_MIDI ? "midi" : "cdc");
+        stream.println();
+
+    } else if (input_buffer.equals("disconnect")) {
+        set_session_connected(source_transport, false);
+        stream.printf("+OK: %s disconnected", source_transport == TRANSPORT_MIDI ? "midi" : "cdc");
+        stream.println();
+
+    } else if (input_buffer.equals("status")) {
         stream.println("+OK");
         if (!KeyboardHost.mounted()) {
             stream.println("HID: unmounted");
@@ -703,9 +830,15 @@ void handle_comm(Stream& stream) {
             stream.printf("Clock: %02d:%02d:%02d", h, m, s);
             stream.println();
         }
+        stream.printf("CDC: %s", app_status.is_cdc_session_connected ? "connected" : "disconnected");
+        stream.println();
+        stream.printf("MIDI: %s", app_status.is_midi_session_connected ? "connected" : "disconnected");
+        stream.println();
+
+    } else if (!is_session_connected(source_transport)) {
+        stream.println("-ERR: Not connected.");
 
     } else if (input_buffer.equals("log get size")) {
-        DEBUG_LOG("[COMM] log get size");
         do {
         if (!MassStorageHost.mounted()) {
             stream.println("-ERR: Not mounted.");
@@ -723,7 +856,6 @@ void handle_comm(Stream& stream) {
         } while (false);
 
     } else if (input_buffer.starts_with("log read ")) {
-        DEBUG_LOG("[COMM] log read");
         do {
             uint32_t offset, length;
             sscanf(input_buffer.get_str(), "log read %u,%u", &offset, &length);
@@ -763,7 +895,6 @@ void handle_comm(Stream& stream) {
         } while (false);
 
     } else if (input_buffer.equals("log clear")) {
-        DEBUG_LOG("[COMM] log clear");
         do {
             if (!MassStorageHost.mounted()) {
                 stream.println("-ERR: Not mounted.");
@@ -779,19 +910,18 @@ void handle_comm(Stream& stream) {
         } while (false);
 
     } else if (input_buffer.starts_with("clock set ")) {
-        DEBUG_LOG("[COMM] clock set");
         unsigned int h = 9, m = 0, s = 0;
         int num_of_fields = sscanf(input_buffer.get_str(), "clock set %u:%u:%u", &h, &m, &s);
         if (num_of_fields != 3) {
             stream.println("-ERR: Invalid input.");
         } else {
             Clock.set_clock(h, m, s);
+            save_clock_to_backup();
             stream.printf("+OK: Clock is now %02d:%02d:%02d", h, m, s);
             stream.println();
         }
 
     } else if (input_buffer.starts_with("dump set ")) {
-        DEBUG_LOG("[COMM] dump set");
         if (input_buffer.equals("dump set on")) {
             app_status.is_passthrough_enabled = true;
             stream.println("+OK: passthrough enabled.");
@@ -801,7 +931,6 @@ void handle_comm(Stream& stream) {
         }
 
     } else {
-        DEBUG_LOG("[COMM] unknown command");
         stream.println("-ERR: Unknown command.");
     }
 
@@ -809,6 +938,9 @@ void handle_comm(Stream& stream) {
     return;
   }
 }
+
+
+
 
 
 
