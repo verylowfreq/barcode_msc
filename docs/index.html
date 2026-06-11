@@ -1,4 +1,4 @@
-<!DOCTYPE html>
+﻿<!DOCTYPE html>
 <html lang="ja">
 <head>
 <meta charset="UTF-8">
@@ -144,18 +144,23 @@ tr:hover td { background: #f8f9fa; }
   <h1>HID Logger</h1>
   <span id="status-label"><span class="dot" id="dot"></span><span id="status-text">未接続</span></span>
   <button id="btn-connect" class="btn-primary btn-sm">接続</button>
+  <button id="btn-midi-connect" class="btn-primary btn-sm">MIDI</button>
 </header>
 
 <main>
   <div id="connect-screen">
     <h2>デバイスに接続</h2>
     <p>HID Logger デバイスを USB ポートに接続して、<br>下のボタンを押してください。</p>
-    <button id="btn-connect2" class="btn-primary" style="font-size:15px;padding:11px 32px;">デバイスを選択して接続</button>
+    <button id="btn-connect2" class="btn-primary" style="font-size:15px;padding:11px 32px;">Serial で接続</button>
+    <button id="btn-midi-connect2" class="btn-primary" style="font-size:15px;padding:11px 32px;margin-top:10px">MIDI で接続</button>
     <div id="no-serial-msg" hidden>
       このブラウザは Web Serial API に対応していません。<br>
       PC では Google Chrome または Microsoft Edge をお使いください。<br>
       Android では Chrome が必要です（HTTPS 接続必須・WebUSB が有効な環境）。<br>
       詳細はデバッグパネルをご確認ください。
+    </div>
+    <div id="no-midi-msg" hidden style="margin-top:18px;font-size:13px;color:var(--danger)">
+      このブラウザは Web MIDI API に対応していません。
     </div>
   </div>
 
@@ -187,7 +192,7 @@ tr:hover td { background: #f8f9fa; }
           <div class="val mono" id="s-clock">—</div>
         </div>
         <div class="status-item">
-          <label>PC 接続</label>
+          <label id="label-conn">PC 接続</label>
           <div class="val" id="s-cdc"><span class="badge badge-green">接続中</span></div>
         </div>
       </div>
@@ -248,7 +253,7 @@ tr:hover td { background: #f8f9fa; }
 <!-- Debug panel -->
 <div id="debug-panel">
   <div id="debug-header">
-    <span>SERIAL DEBUG LOG</span>
+    <span>DEBUG LOG</span>
     <button class="btn-sm" id="btn-debug-clear" style="padding:2px 8px;font-size:11px;background:#21262d;color:#8b949e;border:1px solid #30363d">Clear</button>
     <button class="btn-sm" id="btn-debug-close" style="padding:2px 8px;font-size:11px;background:#21262d;color:#8b949e;border:1px solid #30363d">×</button>
   </div>
@@ -601,10 +606,246 @@ class Device {
   }
 }
 
+// ── MIDI Device ───────────────────────────────────────────────────
+
+class MidiDevice {
+  constructor() {
+    this._midiAccess  = null;
+    this._input       = null;
+    this._output      = null;
+    this._encoder     = new TextEncoder();
+    this._decoder     = new TextDecoder('utf-8');
+    this._sysexBuf    = [];
+    this._rawBuf      = '';
+    this._lineBuf     = [];
+    this._lineWait    = [];
+    this._ptOn        = false;
+    this.onPassthrough = null;
+    this.onDisconnect  = null;
+    this._mutex       = Promise.resolve();
+  }
+
+  async connect(midiAccess, input, output) {
+    this._midiAccess = midiAccess;
+    this._input  = input;
+    this._output = output;
+    this._sysexBuf = [];
+    this._rawBuf = ''; this._lineBuf = []; this._lineWait = [];
+    this._ptOn   = false;
+    this._mutex  = Promise.resolve();
+    await this._input.open();
+    await this._output.open();
+    this._input.onmidimessage = (e) => this._onMessage(e);
+    this._midiAccess.onstatechange = (e) => {
+      if (e.port === this._input && e.port.state === 'disconnected' && this.onDisconnect)
+        this.onDisconnect();
+    };
+    dbg('info', `MIDI connected: in="${input.name}" out="${output.name}"`);
+    dbg('info', `MIDI port state: in=${this._input.state}/${this._input.connection} out=${this._output.state}/${this._output.connection}`);
+  }
+
+  disconnect() {
+    if (this._input) this._input.onmidimessage = null;
+    this._input = this._output = null;
+    this._midiAccess = null;
+    dbg('info', 'MIDI disconnected');
+  }
+
+  _onMessage(event) {
+    const d = Array.from(event.data);
+    dbg('recv', `MIDI raw ${d.length}B: ${d.map(v => v.toString(16).padStart(2, '0')).join(' ')}`);
+
+    if (d[0] === 0xF0) this._sysexBuf = [];
+    if (this._sysexBuf.length > 0 || d[0] === 0xF0) {
+      this._sysexBuf.push(...d);
+    } else {
+      return;
+    }
+
+    if (this._sysexBuf[this._sysexBuf.length - 1] !== 0xF7) {
+      dbg('recv', `MIDI SysEx fragment buffered (${this._sysexBuf.length}B)`);
+      return;
+    }
+
+    const payload = this._sysexBuf.slice(1, -1);
+    this._sysexBuf = [];
+    let text = '';
+    for (let i = 0; i + 1 < payload.length; i += 2)
+      text += String.fromCharCode(parseInt(String.fromCharCode(payload[i], payload[i + 1]), 16));
+    dbg('recv', `MIDI SysEx ${payload.length >> 1}B: "${text.replace(/\r/g,'\\r').replace(/\n/g,'\\n')}"`);
+    this._rawBuf += text;
+    this._process();
+  }
+
+  _process() {
+    while (true) {
+      const nl = this._rawBuf.indexOf('\n');
+      if (nl === -1) break;
+      let line = this._rawBuf.slice(0, nl);
+      this._rawBuf = this._rawBuf.slice(nl + 1);
+      if (line.endsWith('\r')) line = line.slice(0, -1);
+
+      if (this._ptOn && this.onPassthrough && /^\d{2}:\d{2}:\d{2}\t/.test(line)) {
+        dbg('line', `MIDI passthrough: "${line}"`);
+        this.onPassthrough(line);
+        continue;
+      }
+      if (this._lineWait.length > 0) {
+        const w = this._lineWait.shift();
+        clearTimeout(w.timer);
+        dbg('line', `MIDI →waiter: "${line}" (${this._lineWait.length} remaining)`);
+        w.resolve(line);
+      } else {
+        dbg('line', `MIDI →buf[${this._lineBuf.length}]: "${line}"`);
+        this._lineBuf.push(line);
+      }
+    }
+  }
+
+  _readLine(ms = 6000) {
+    if (this._lineBuf.length > 0) {
+      const line = this._lineBuf.shift();
+      dbg('line', `MIDI _readLine ←buf: "${line}" (${this._lineBuf.length} left)`);
+      return Promise.resolve(line);
+    }
+    return new Promise((resolve, reject) => {
+      const w = { resolve: null, timer: null };
+      w.resolve = (l) => { dbg('line', `MIDI _readLine ←recv: "${l}"`); resolve(l); };
+      if (ms > 0) {
+        w.timer = setTimeout(() => {
+          const i = this._lineWait.indexOf(w);
+          if (i !== -1) this._lineWait.splice(i, 1);
+          const msg = `MIDI タイムアウト (${ms}ms) waiters:${this._lineWait.length} buf:${this._lineBuf.length}`;
+          dbg('err', msg);
+          reject(new Error(msg));
+        }, ms);
+      }
+      this._lineWait.push(w);
+      dbg('line', `MIDI _readLine waiting (waiters:${this._lineWait.length}, buf:${this._lineBuf.length})`);
+    });
+  }
+
+  async _send(cmd) {
+    const bytes = this._encoder.encode(cmd + '\n');
+    const hex   = '0123456789abcdef';
+    const sysex = new Uint8Array(bytes.length * 2 + 2);
+    sysex[0] = 0xF0;
+    for (let i = 0; i < bytes.length; i++) {
+      sysex[1 + i * 2]     = hex.charCodeAt(bytes[i] >> 4);
+      sysex[1 + i * 2 + 1] = hex.charCodeAt(bytes[i] & 0x0f);
+    }
+    sysex[sysex.length - 1] = 0xF7;
+    dbg('send', `MIDI "${cmd}" (${sysex.length}B)`);
+    this._output.send(sysex);
+  }
+
+  _cmd(fn) {
+    const p = this._mutex.then(() => fn());
+    this._mutex = p.catch(() => {});
+    return p;
+  }
+
+  async getStatus() {
+    return this._cmd(async () => {
+      await this._send('status');
+      const first = await this._readLine();
+      if (!first.startsWith('+OK')) throw new Error(first);
+      const r = {};
+      for (let i = 0; i < 3; i++) {
+        const l = await this._readLine();
+        const c = l.indexOf(': ');
+        if (c !== -1) r[l.slice(0, c).toLowerCase()] = l.slice(c + 2);
+        else dbg('err', `MIDI getStatus: unexpected line[${i}]: "${l}"`);
+      }
+      dbg('info', 'MIDI getStatus:', JSON.stringify(r));
+      return r;
+    });
+  }
+
+  async getLogSize() {
+    return this._cmd(async () => {
+      await this._send('log get size');
+      const l = await this._readLine();
+      if (!l.startsWith('+OK')) throw new Error(l);
+      const m = l.match(/filesize=(\d+)/);
+      if (!m) throw new Error('filesize parse error: ' + l);
+      const size = parseInt(m[1]);
+      dbg('info', `MIDI log size: ${size} bytes`);
+      return size;
+    });
+  }
+
+  async readLogChunk(offset, length) {
+    return this._cmd(async () => {
+      await this._send(`log read ${offset},${length}`);
+      const first = await this._readLine(10000);
+      if (!first.startsWith('+OK')) throw new Error(first);
+      const m = first.match(/length=(\d+)/);
+      const len = m ? parseInt(m[1]) : length;
+      const chunks = [];
+      let total = 0;
+      while (total < len) {
+        const line  = await this._readLine(10000);
+        const bytes = this._encoder.encode(line + '\r\n');
+        if (total + bytes.length > len)
+          throw new Error(`チャンク長不正 (need ${len}B, got ${total + bytes.length}B)`);
+        chunks.push(bytes);
+        total += bytes.length;
+      }
+      const data = new Uint8Array(len);
+      let pos = 0;
+      for (const chunk of chunks) { data.set(chunk, pos); pos += chunk.length; }
+      await this._readLine(4000); // trailing \r\n
+      return this._decoder.decode(data);
+    });
+  }
+
+  async readFullLog(onProgress) {
+    const size = await this.getLogSize();
+    if (size === 0) { dbg('info', 'MIDI log is empty'); return ''; }
+    const text = await this.readLogChunk(0, size);
+    if (onProgress) onProgress(1);
+    return text;
+  }
+
+  async clearLog() {
+    return this._cmd(async () => {
+      await this._send('log clear');
+      const l = await this._readLine();
+      if (!l.startsWith('+OK')) throw new Error(l);
+      dbg('info', 'MIDI log cleared');
+    });
+  }
+
+  async setClock(h, m, s) {
+    return this._cmd(async () => {
+      const p = n => String(n).padStart(2, '0');
+      await this._send(`clock set ${p(h)}:${p(m)}:${p(s)}`);
+      const l = await this._readLine();
+      if (!l.startsWith('+OK')) throw new Error(l);
+      dbg('info', 'MIDI clock set:', l);
+      return l;
+    });
+  }
+
+  async setPassthrough(on) {
+    return this._cmd(async () => {
+      await this._send(`dump set ${on ? 'on' : 'off'}`);
+      const l = await this._readLine();
+      if (!l.startsWith('+OK')) throw new Error(l);
+      this._ptOn = on;
+      dbg('info', `MIDI passthrough ${on ? 'enabled' : 'disabled'}`);
+    });
+  }
+}
+
 // ── UI ────────────────────────────────────────────────────────────
 
-const device   = new Device();
+const serialDev = new Device();
+const midiDev   = new MidiDevice();
+let device      = serialDev;
 let connected  = false;
+let usingMidi  = false;
 let ptActive   = false;
 let feedCount  = 0;
 let logEntries = [];
@@ -627,8 +868,15 @@ function setConnected(on) {
   $('status-text').textContent = on ? '接続済み' : '未接続';
   $('btn-connect').textContent = on ? '切断' : '接続';
   $('btn-connect').className = on ? 'btn-secondary btn-sm' : 'btn-primary btn-sm';
+  const midiBtn = $('btn-midi-connect');
+  if (midiBtn) midiBtn.hidden = on;
   $('connect-screen').hidden = on;
   $('app-panel').hidden = !on;
+  if (on) {
+    const type = usingMidi ? 'MIDI' : 'CDC';
+    $('label-conn').textContent = `ホスト接続 (${type})`;
+    $('s-cdc').innerHTML = `<span class="badge badge-green">${type} 接続中</span>`;
+  }
 }
 
 function fmtDevice(v) {
@@ -650,6 +898,7 @@ function showAlert(elId, cls, msg, autoHideMs = 0) {
 
 async function doConnect() {
   if (!serial) return;
+  device = serialDev; usingMidi = false;
   try {
     dbg('info', 'requestPort...');
     const port = await serial.requestPort();
@@ -680,8 +929,53 @@ async function doDisconnect() {
   setConnected(false);
 }
 
+async function doMidiConnect() {
+  if (!('requestMIDIAccess' in navigator)) {
+    alert('このブラウザは Web MIDI API に対応していません。');
+    return;
+  }
+  device = midiDev; usingMidi = true;
+  try {
+    dbg('info', 'requestMIDIAccess...');
+    const midiAccess = await navigator.requestMIDIAccess({ sysex: true });
+    const inputs  = [...midiAccess.inputs.values()];
+    const outputs = [...midiAccess.outputs.values()];
+    dbg('info', `MIDI inputs: ${inputs.map(p => p.name).join(', ') || 'none'}`);
+    dbg('info', `MIDI outputs: ${outputs.map(p => p.name).join(', ') || 'none'}`);
+
+    const input  = inputs.find(p => p.name && p.name.includes('HID Logger')) || null;
+    const output = outputs.find(p => p.name && p.name.includes('HID Logger')) || null;
+
+    if (!input || !output) {
+      const availIn = inputs.map(p => `"${p.name}"`).join(', ') || 'none';
+      const availOut = outputs.map(p => `"${p.name}"`).join(', ') || 'none';
+      throw new Error(
+        `HID Logger MIDI port not found.\n` +
+        `Inputs: ${availIn}\n` +
+        `Outputs: ${availOut}`
+      );
+    }
+
+    await midiDev.connect(midiAccess, input, output);
+    midiDev.onDisconnect = () => {
+      dbg('info', 'MIDI device disconnected');
+      setConnected(false);
+      if (ptActive) { ptActive = false; updatePtBtn(); }
+    };
+    midiDev.onPassthrough = onPassthrough;
+    setConnected(true);
+    await refreshStatus();
+  } catch(e) {
+    device = serialDev; usingMidi = false;
+    dbg('err', 'MIDI connect failed:', e.message);
+    alert('MIDI接続に失敗しました:\n' + e.message);
+  }
+}
+
 $('btn-connect').addEventListener('click', () => connected ? doDisconnect() : doConnect());
 $('btn-connect2').addEventListener('click', doConnect);
+$('btn-midi-connect').addEventListener('click', doMidiConnect);
+$('btn-midi-connect2').addEventListener('click', doMidiConnect);
 
 // ── Status tab ──
 
@@ -892,9 +1186,19 @@ $('btn-setclock').addEventListener('click', async () => {
     $('btn-connect').disabled = true;
     $('btn-connect2').disabled = true;
   }
+  if (!('requestMIDIAccess' in navigator)) {
+    $('no-midi-msg').hidden = false;
+    $('btn-midi-connect').hidden = true;
+    $('btn-midi-connect2').hidden = true;
+    dbg('info', 'Web MIDI API not available');
+  } else {
+    dbg('info', 'Web MIDI API available');
+  }
   setConnected(false);
   dbg('info', 'Ready.');
 })();
 </script>
 </body>
 </html>
+
+

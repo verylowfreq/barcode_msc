@@ -1,9 +1,17 @@
+﻿/** Required libraries:
+ * - Adafruit GFX
+ * - Adafruit SSD1306
+ */
+
 #include <Adafruit_TinyUSB.h>
 #include <KeyboardHost.h>
 #include <MassStorageHost.h>
 #include <Wire.h>
 #include <Adafruit_GFX.h>
 #include <Adafruit_SSD1306.h>
+#include "textbuffer.h"
+#include "clock_manager.h"
+#include "ringbuffer.h"
 
 
 constexpr int PIN_LED_1 = PB15;
@@ -15,6 +23,12 @@ constexpr int PIN_BTN_1 = PB12;
 constexpr int PIN_BTN_2 = PB13;
 constexpr int PIN_BTN_3 = PB14;
 
+constexpr bool ENABLE_DEBUG_SERIAL = true;
+constexpr unsigned long DEBUG_SERIAL_WAIT_INTERVAL_MS = 10;
+
+#define DEBUG_LOG(msg) do { if (ENABLE_DEBUG_SERIAL && Serial) { Serial.println(msg); Serial.flush(); } } while (0)
+#define DEBUG_LOGF(...) do { if (ENABLE_DEBUG_SERIAL && Serial) { Serial.printf(__VA_ARGS__); Serial.print("\r\n"); Serial.flush(); } } while (0)
+
 
 #define SCREEN_ADDRESS 0x3C
 // Adafruit_SSD1306(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire, OLED_RESET)
@@ -22,7 +36,149 @@ Adafruit_SSD1306 display(128, 32, &Wire, -1);
 
 Adafruit_USBH_Host USBHost;
 
+Adafruit_USBD_MIDI USB_MIDI;
+
+template<size_t in_len, size_t out_len>
+class MIDIStream : public Stream {
+public:
+    RingBuffer<uint8_t, in_len>& inbuffer;
+    TextBuffer<out_len>& outbuffer;
+
+    MIDIStream(RingBuffer<uint8_t, in_len>& inbuffer, TextBuffer<out_len>& outbuffer) : 
+            inbuffer(inbuffer), outbuffer(outbuffer) {
+
+    }
+
+    void begin() {
+        inbuffer.begin();
+        outbuffer.begin();
+    }
+    
+    size_t write(uint8_t ch) override {
+        if (outbuffer.is_full()) {
+            flush();
+        }
+        return outbuffer.append_char(ch) ? 1 : 0;
+    }
+    
+    size_t write(const uint8_t *buffer, size_t size) override {
+        size_t cnt = 0;
+        for (; cnt < size; ++cnt) {
+            if (outbuffer.is_full()) {
+                flush();
+            }
+            if (!outbuffer.append_char(buffer[cnt])) {
+                break;
+            }
+        }
+        return cnt;
+    }
+    
+    int availableForWrite() override {
+        return outbuffer.capacity() - outbuffer.length();
+    }
+
+    void convertHex(uint8_t val, char* dest) {
+        uint8_t upper = val >> 4;
+        uint8_t lower = val & 0x0f;
+        dest[0] = (upper >= 0x0a) ? 'a' + (upper - 0x0a) : '0' + upper;
+        dest[1] = (lower >= 0x0a) ? 'a' + (lower - 0x0a) : '0' + lower;
+    }
+
+    void flush() override {
+        if (outbuffer.length() == 0) { return; }
+        DEBUG_LOGF("[MIDI TX] flush len=%u mounted=%d text=\"%s\"", outbuffer.length(), TinyUSBDevice.mounted() ? 1 : 0, outbuffer.get_str());
+
+        uint8_t packet[4] = {0x04, 0, 0, 0};
+        uint8_t packet_len = 0;
+        auto push_sysex_byte = [&](uint8_t b) {
+            packet[1 + packet_len] = b;
+            packet_len += 1;
+            if (packet_len == 3) {
+                packet[0] = 0x04;
+                while (!USB_MIDI.writePacket(packet)) {
+                    delay(1);
+                }
+                packet_len = 0;
+            }
+        };
+
+        push_sysex_byte(0xF0);
+        for (size_t i = 0; i < outbuffer.length(); i++) {
+            char hex[2];
+            convertHex(outbuffer.get_str()[i], hex);
+            push_sysex_byte((uint8_t)hex[0]);
+            push_sysex_byte((uint8_t)hex[1]);
+        }
+        push_sysex_byte(0xF7);
+
+        if (packet_len > 0) {
+            packet[0] = 0x04 + packet_len;
+            for (uint8_t i = packet_len; i < 3; i++) {
+                packet[1 + i] = 0x00;
+            }
+            while (!USB_MIDI.writePacket(packet)) {
+                delay(1);
+            }
+        }
+
+        outbuffer.clear();
+    }
+
+    int available() override {
+        return inbuffer.available();
+    }
+
+    int read() override {
+        uint8_t val = 0x00;
+        if (inbuffer.pop_front(&val)) {
+            return val;
+        } else {
+            return -1;
+        }
+    }
+    
+    int peek() override {
+        uint8_t val = 0x00;
+        if (inbuffer.peek_front(&val)) {
+            return val;
+        } else {
+            return -1;
+        }
+    }
+
+    size_t readBytes(uint8_t* buffer, size_t length) {
+        return readBytes((char*)buffer, length);
+    }
+
+    size_t readBytes(char* buffer, size_t length) {
+        size_t i = 0;
+        for (; i < length; i++) {
+            uint8_t val = 0;
+            if (!inbuffer.pop_front(&val)) {
+                return i;
+            }
+            buffer[i] = (char)val;
+        }
+        return i;
+    }
+};
+
+// TextBuffer<64> midi_input_buffer;
+RingBuffer<uint8_t, 64> midi_input_buffer;
+TextBuffer<128> midi_output_buffer;
+static MIDIStream<64, 128> MIDI_Stream(midi_input_buffer, midi_output_buffer);
+
+
+typedef enum {
+    TRANSPORT_CDC,
+    TRANSPORT_MIDI
+} transport_t;
+
+
 typedef struct {
+    transport_t transport;
+
     bool is_hid_mounted;
     uint16_t hid_addr;
     uint16_t hid_instance;
@@ -44,143 +200,103 @@ typedef struct {
     // This device is mounted as CDC device from PC.
     bool is_cdc_device_mounted;
 } app_status_t;
+
 static app_status_t app_status;
 
-template<size_t BUFLEN>
-class TextBuffer {
-public:
-    char buffer[BUFLEN];
-    size_t end = 0;
-
-    void begin() {
-        clear();
-    }
-
-    size_t length() {
-        return end;
-    }
-
-    bool is_full() {
-        return length() == capacity();
-    }
-
-    bool is_empty() {
-        return end == 0;
-    }
-
-    bool append_char(char ch) {
-        if (length() + 1 > capacity()) {
-            return false;
-        } else {
-            buffer[end] = ch;
-            end += 1;
-            buffer[end] = '\0';
-            return true;
-        }
-    }
-
-    bool append_str(const char* s) {
-        size_t slen = strlen(s);
-        if (length() + slen > capacity()) {
-            return false;
-        } else {
-            memcpy(&buffer[end], s, slen);
-            end += slen;
-            buffer[end] = '\0';
-            return true;
-        }
-    }
-
-    bool truncate(size_t newsize) {
-        if (newsize >= length()) {
-            return false;
-        } else {
-            end = newsize;
-            buffer[end] = '\0';
-            return true;
-        }
-    }
-
-    const char* get_str() {
-        return buffer;
-    }
-
-    void clear() {
-        end = 0;
-        buffer[0] = '\0';
-    }
-
-    size_t capacity() const {
-        return BUFLEN - 1;
-    }
-
-    void trim_end() {
-        while (end > 0 &&
-               (buffer[end - 1] == ' ' ||
-                buffer[end - 1] == '\t' ||
-                buffer[end - 1] == '\r' ||
-                buffer[end - 1] == '\n')) {
-          end -= 1;
-        }
-        buffer[end] = '\0';
-    }
-
-    bool equals(const char* s) {
-        return strcmp(get_str(), s) == 0;
-    }
-
-    bool starts_with(const char* s) {
-        return strncmp(get_str(), s, strlen(s)) == 0;
-    }
-};
 
 static TextBuffer<256> textBuffer;
 static TextBuffer<128> input_buffer;
 
-class ClockManager {
-public:
-  unsigned long epoch_millis = 0;
-  unsigned long time_offset = 0;
-
-  void begin() {
-    epoch_millis = millis();
-    time_offset = 0;
-  }
-
-  unsigned long get_current_time_millis() {
-    unsigned long elapsed = millis() - epoch_millis;
-    return elapsed + time_offset;
-  }
-
-  void set_clock(uint8_t hour, uint8_t minute, uint8_t second) {
-    epoch_millis = millis();
-    time_offset = ((unsigned long)hour * 3600 + (unsigned long)minute * 60 + (unsigned long)second) * 1000;
-  }
-
-  void get_clock(uint8_t* hour, uint8_t* minute, uint8_t* second) {
-    unsigned long tm = get_current_time_millis() / 1000;
-    uint8_t h = (tm / 3600) % 24;
-    uint8_t m = (tm / 60) % 60;
-    uint8_t s = (tm) % 60;
-    if (hour) { *hour = h; }
-    if (minute) { *minute = m; }
-    if (second) { *second = s; }
-  }
-
-  uint8_t get_hour() {
-    return (get_current_time_millis() / 1000 / 3600) % 24;
-  }
-
-  uint8_t get_minute() {
-    return (get_current_time_millis() / 1000 / 60) % 60;
-  }
-
-  uint8_t get_second() {
-    return (get_current_time_millis()/ 1000) % 60;
-  }
-};
 
 ClockManager Clock;
+
+
+static uint8_t fromHexChar(uint8_t c) {
+    if (c >= '0' && c <= '9') return c - '0';
+    if (c >= 'a' && c <= 'f') return c - 'a' + 10;
+    if (c >= 'A' && c <= 'F') return c - 'A' + 10;
+    return 0;
+}
+
+void wait_for_debug_serial() {
+    if (!ENABLE_DEBUG_SERIAL) { return; }
+    while (!Serial) {
+        delay(DEBUG_SERIAL_WAIT_INTERVAL_MS);
+    }
+}
+
+static char midi_rx_hex_buffer[128] = {};
+static size_t midi_rx_hex_length = 0;
+
+void decode_midi_sysex_buffer() {
+    if ((midi_rx_hex_length & 1) != 0) {
+        DEBUG_LOGF("[MIDI RX] odd hex length=%u", midi_rx_hex_length);
+        midi_rx_hex_length = 0;
+        midi_rx_hex_buffer[0] = '\0';
+        return;
+    }
+
+    for (size_t i = 0; i + 1 < midi_rx_hex_length; i += 2) {
+        const uint8_t b = (fromHexChar(midi_rx_hex_buffer[i]) << 4) | fromHexChar(midi_rx_hex_buffer[i + 1]);
+        if (!midi_input_buffer.push_back(b)) {
+            DEBUG_LOG("[MIDI RX] input buffer overflow");
+            break;
+        }
+    }
+
+    DEBUG_LOGF("[MIDI RX] decoded bytes=%u", midi_input_buffer.available());
+    midi_rx_hex_length = 0;
+    midi_rx_hex_buffer[0] = '\0';
+}
+
+void handle_midi_byte(uint8_t b) {
+    if (b == 0xF0) {
+        static bool led = false;
+        led = !led;
+        digitalWrite(PIN_LED_1, led ? HIGH : LOW);
+        midi_rx_hex_length = 0;
+        midi_rx_hex_buffer[0] = '\0';
+        return;
+    }
+
+    if (b == 0xF7) {
+        DEBUG_LOGF("[MIDI RX] SysEx size=%u", midi_rx_hex_length + 2);
+        decode_midi_sysex_buffer();
+        return;
+    }
+
+    if (midi_rx_hex_length + 1 >= sizeof(midi_rx_hex_buffer)) {
+        DEBUG_LOG("[MIDI RX] hex buffer overflow");
+        midi_rx_hex_length = 0;
+        midi_rx_hex_buffer[0] = '\0';
+        return;
+    }
+
+    midi_rx_hex_buffer[midi_rx_hex_length++] = (char)b;
+    midi_rx_hex_buffer[midi_rx_hex_length] = '\0';
+}
+
+void poll_midi_rx() {
+    uint8_t packet[4];
+    while (USB_MIDI.readPacket(packet)) {
+        DEBUG_LOGF("[MIDI RX] packet=%02x %02x %02x %02x", packet[0], packet[1], packet[2], packet[3]);
+        const uint8_t cin = packet[0] & 0x0f;
+        size_t payload_len = 0;
+        if (cin == 0x04 || cin == 0x07) {
+            payload_len = 3;
+        } else if (cin == 0x06) {
+            payload_len = 2;
+        } else if (cin == 0x05) {
+            payload_len = 1;
+        } else {
+            continue;
+        }
+
+        for (size_t i = 0; i < payload_len; i++) {
+            handle_midi_byte(packet[1 + i]);
+        }
+    }
+}
 
 
 void setup() {
@@ -212,9 +328,28 @@ void setup() {
       reboot_bootloader();
   }
 
-  Serial.setStringDescriptor("HID Logger");
-  TinyUSBDevice.addInterface(Serial);
-  Serial.begin(115200);
+  if (digitalRead(PIN_BTN_2) == LOW) {
+    app_status.transport = TRANSPORT_MIDI;
+  } else {
+    app_status.transport = TRANSPORT_CDC;
+  }
+
+
+  if (app_status.transport == TRANSPORT_CDC) {
+    Serial.setStringDescriptor("HID Logger");
+    TinyUSBDevice.addInterface(Serial);
+    Serial.begin(115200);
+
+    } else if (app_status.transport == TRANSPORT_MIDI) {
+        if (ENABLE_DEBUG_SERIAL) {
+            Serial.setStringDescriptor("HID Logger (Debug)");
+            TinyUSBDevice.addInterface(Serial);
+            Serial.begin(115200);
+        }
+        MIDI_Stream.begin();
+        USB_MIDI.setStringDescriptor("HID Logger (MIDI)");
+        USB_MIDI.begin();
+    }
 
   Clock.begin();
   // Serial.printf("Clock: %02d:%02d:%02d\r\n", Clock.get_hour(), Clock.get_minute(), Clock.get_second());
@@ -275,6 +410,17 @@ void setup() {
     TinyUSBDevice.attach();
   }
 
+  if (app_status.transport == TRANSPORT_MIDI && ENABLE_DEBUG_SERIAL) {
+    display.setTextSize(1);
+    display.setCursor(0, 24);
+    display.fillRect(0, 24, 128, 8, SSD1306_BLACK);
+    display.print("Wait CDC...");
+    display.display();
+    wait_for_debug_serial();
+    DEBUG_LOG("[BOOT] debug serial connected");
+    DEBUG_LOGF("[BOOT] transport=%s", app_status.transport == TRANSPORT_MIDI ? "MIDI" : "CDC");
+  }
+
   display.setTextSize(1);
   display.setCursor(0, 24);
   display.print("Ready.");
@@ -284,6 +430,7 @@ void setup() {
 
 void loop() {
   USBHost.task();
+  poll_midi_rx();
 
   if (!app_status.is_cdc_device_mounted && Serial) {
       app_status.is_cdc_device_mounted = true;
@@ -324,7 +471,12 @@ void loop() {
 
   handle_button();
 
-  handle_serial();
+  if (app_status.transport == TRANSPORT_CDC) {
+      handle_comm(Serial);
+  } else if (app_status.transport == TRANSPORT_MIDI) {
+    handle_comm(MIDI_Stream);
+    MIDI_Stream.flush();
+  }
 
   if (KeyboardHost.available() > 0) {
     char ch = (char)KeyboardHost.read();
@@ -349,8 +501,13 @@ void loop() {
       }
 
       if (app_status.is_passthrough_enabled) {
-        write_with_clock(Serial, textBuffer.get_str());
-        Serial.flush();
+        if (app_status.transport == TRANSPORT_CDC) {
+          write_with_clock(Serial, textBuffer.get_str());
+          Serial.flush();
+        } else if (app_status.transport == TRANSPORT_MIDI) {
+          write_with_clock(MIDI_Stream, textBuffer.get_str());
+          MIDI_Stream.flush();
+        }
       }
 
       textBuffer.clear();
@@ -510,80 +667,86 @@ void set_clock() {
   request_clear_after_millis(3000);
 }
 
-void handle_serial() {
-  while (Serial.available() > 0) {
-    char ch = (char)Serial.read();
+void handle_comm(Stream& stream) {
+  while (stream.available() > 0) {
+    char ch = (char)stream.read();
+    DEBUG_LOGF("[COMM] read ch=0x%02x '%c'", (uint8_t)ch, (ch >= 0x20 && ch <= 0x7e) ? ch : '.');
     if (!input_buffer.append_char(ch)) {
-        Serial.println("-ERR: input too long");
+        stream.println("-ERR: input too long");
+        DEBUG_LOG("[COMM] input buffer overflow");
         input_buffer.clear();
         return;
     }
 
     if (ch != '\n') { continue; }
     input_buffer.trim_end();
+    DEBUG_LOGF("[COMM] command=\"%s\"", input_buffer.get_str());
 
     if (input_buffer.equals("status")) {
-        Serial.println("+OK");
+        DEBUG_LOG("[COMM] status");
+        stream.println("+OK");
         if (!KeyboardHost.mounted()) {
-            Serial.println("HID: unmounted");
+            stream.println("HID: unmounted");
         } else {
-            Serial.printf("HID: mounted(0x%04x,0x%04x)", app_status.hid_vid, app_status.hid_pid);
-            Serial.println();
+            stream.printf("HID: mounted(0x%04x,0x%04x)", app_status.hid_vid, app_status.hid_pid);
+            stream.println();
         }
         if (!MassStorageHost.mounted()) {
-            Serial.println("MSC: unmounted");
+            stream.println("MSC: unmounted");
         } else {
-            Serial.printf("MSC: mounted(0x%04x,0x%04x)", app_status.msc_vid, app_status.msc_pid);
-            Serial.println();
+            stream.printf("MSC: mounted(0x%04x,0x%04x)", app_status.msc_vid, app_status.msc_pid);
+            stream.println();
         }
         {
             uint8_t h, m, s;
             Clock.get_clock(&h, &m, &s);
-            Serial.printf("Clock: %02d:%02d:%02d", h, m, s);
-            Serial.println();
+            stream.printf("Clock: %02d:%02d:%02d", h, m, s);
+            stream.println();
         }
 
     } else if (input_buffer.equals("log get size")) {
+        DEBUG_LOG("[COMM] log get size");
         do {
         if (!MassStorageHost.mounted()) {
-            Serial.println("-ERR: Not mounted.");
+            stream.println("-ERR: Not mounted.");
             break;
         }
         MscFile file = MassStorageHost.open("/log.txt", O_RDONLY);
         if (!file) {
-            Serial.println("-ERR: log file not found.");
+            stream.println("-ERR: log file not found.");
             break;
         }
-        size_t filesize = file.size();
-        file.close();
-        Serial.printf("+OK: filesize=%u", filesize);
-        Serial.println();
+            size_t filesize = file.size();
+            file.close();
+            stream.printf("+OK: filesize=%u", filesize);
+            stream.println();
         } while (false);
 
     } else if (input_buffer.starts_with("log read ")) {
+        DEBUG_LOG("[COMM] log read");
         do {
             uint32_t offset, length;
             sscanf(input_buffer.get_str(), "log read %u,%u", &offset, &length);
             MscFile file = MassStorageHost.open("/log.txt", O_RDONLY);
             if (!file) {
-            Serial.println("-ERR: file not found");
-            Serial.println();
-            return;
+                stream.println("-ERR: file not found");
+                stream.println();
+                break;
             }
             size_t filesize = file.size();
             if (offset > filesize) {
-                Serial.println("-ERR: Invalid offset");
+                stream.println("-ERR: Invalid offset");
                 file.close();
                 return;
             }
             if (offset + length > filesize) {
-                Serial.println("-ERR: Invalid length");
+                stream.println("-ERR: Invalid length");
                 file.close();
                 return;
             }
             file.seek(offset);
-            Serial.printf("+OK: offset=%d,length=%d", offset, length);
-            Serial.println();
+            stream.printf("+OK: offset=%d,length=%d", offset, length);
+            stream.println();
             uint8_t buf[64];
             while (length > 0) {
                 size_t chunksize = 63;
@@ -591,54 +754,62 @@ void handle_serial() {
                 chunksize = length;
                 }
                 size_t readlen = file.read(buf, chunksize);
-                Serial.write(buf, readlen);
-                Serial.flush();
+                stream.write(buf, readlen);
+                stream.flush();
                 length -= readlen;
             }
             file.close();
-            Serial.println();
+            stream.println();
         } while (false);
 
     } else if (input_buffer.equals("log clear")) {
+        DEBUG_LOG("[COMM] log clear");
         do {
             if (!MassStorageHost.mounted()) {
-                Serial.println("-ERR: Not mounted.");
+                stream.println("-ERR: Not mounted.");
                 break;
             }
             MscFile file = MassStorageHost.open("/log.txt", O_CREAT | O_WRITE | O_TRUNC);
             if (!file) {
-            Serial.println("-ERR: log file not found.");
+            stream.println("-ERR: log file not found.");
             break;
             }
             file.close();
-            Serial.println("+OK: log file cleared.");
+            stream.println("+OK: log file cleared.");
         } while (false);
 
     } else if (input_buffer.starts_with("clock set ")) {
+        DEBUG_LOG("[COMM] clock set");
         unsigned int h = 9, m = 0, s = 0;
         int num_of_fields = sscanf(input_buffer.get_str(), "clock set %u:%u:%u", &h, &m, &s);
         if (num_of_fields != 3) {
-            Serial.println("-ERR: Invalid input.");
+            stream.println("-ERR: Invalid input.");
         } else {
             Clock.set_clock(h, m, s);
-            Serial.printf("+OK: Clock is now %02d:%02d:%02d", h, m, s);
-            Serial.println();
+            stream.printf("+OK: Clock is now %02d:%02d:%02d", h, m, s);
+            stream.println();
         }
 
     } else if (input_buffer.starts_with("dump set ")) {
+        DEBUG_LOG("[COMM] dump set");
         if (input_buffer.equals("dump set on")) {
             app_status.is_passthrough_enabled = true;
-            Serial.println("+OK: passthrough enabled.");
+            stream.println("+OK: passthrough enabled.");
         } else {
             app_status.is_passthrough_enabled = false;
-            Serial.println("+OK: passthrough disabled.");
+            stream.println("+OK: passthrough disabled.");
         }
 
     } else {
-        Serial.println("-ERR: Unknown command.");
+        DEBUG_LOG("[COMM] unknown command");
+        stream.println("-ERR: Unknown command.");
     }
 
     input_buffer.clear();
     return;
   }
 }
+
+
+
+
